@@ -165,6 +165,7 @@ export class GameSession {
         invulnerableFor: 1.5,
         alive: true,
         downFor: 0,
+        disconnected: false,
         kills: 0,
         gold: 0,
         level: 1,
@@ -198,6 +199,27 @@ export class GameSession {
   removePlayer(playerId) {
     this.players.delete(playerId);
     if (!this.ended) this.checkEndConditions();
+  }
+
+  markDisconnected(playerId) {
+    const player = this.players.get(playerId);
+    if (player) player.disconnected = true;
+  }
+
+  reconnectPlayer(oldId, newId) {
+    const player = this.players.get(oldId);
+    if (!player) return false;
+    this.players.delete(oldId);
+    player.id = newId;
+    player.disconnected = false;
+    this.players.set(newId, player);
+    return true;
+  }
+
+  resendState(playerId) {
+    this.io.to(playerId).emit("game:start", { mode: this.room.mode, map: this.map });
+    this.io.to(playerId).emit("shop:stock", this.shopStockPayload());
+    this.io.to(playerId).emit("game:snapshot", this.snapshot());
   }
 
   setInput(playerId, rawInput = {}) {
@@ -322,10 +344,14 @@ export class GameSession {
   }
 
   emitShopStock() {
-    this.io.to(this.room.code).emit("shop:stock", {
+    this.io.to(this.room.code).emit("shop:stock", this.shopStockPayload());
+  }
+
+  shopStockPayload() {
+    return {
       services: SHOP_SERVICES.map(({ id, name, description, cost }) => ({ id, name, description, cost })),
       stock: this.shopStock,
-    });
+    };
   }
 
   update(dt) {
@@ -460,6 +486,7 @@ export class GameSession {
         life: 1,
         aoe: 0,
         color: "#ffd166",
+        hitTargets: [],
       });
     }
   }
@@ -577,7 +604,7 @@ export class GameSession {
   findTarget(player) {
     const candidates = this.room.mode === "pve"
       ? [...this.enemies.values()]
-      : this.livingPlayers().filter((candidate) => candidate.id !== player.id);
+      : this.livingPlayers().filter((candidate) => candidate.id !== player.id && !candidate.disconnected);
     let closest = null;
     let closestDistance = 780 * 780;
     for (const candidate of candidates) {
@@ -614,6 +641,7 @@ export class GameSession {
         aoe: config.aoe,
         color: config.color,
         crit,
+        hitTargets: [],
       };
       this.projectiles.set(projectile.id, projectile);
     }
@@ -693,9 +721,12 @@ export class GameSession {
   }
 
   hitEnemy(projectile) {
+    if (!Array.isArray(projectile.hitTargets)) projectile.hitTargets = [];
     for (const enemy of this.enemies.values()) {
+      if (projectile.hitTargets.includes(enemy.id)) continue;
       const hitRadius = enemy.radius + projectile.radius;
       if (distanceSquared(projectile, enemy) > hitRadius * hitRadius) continue;
+      projectile.hitTargets.push(enemy.id);
       enemy.hp -= projectile.damage;
       const owner = this.players.get(projectile.ownerId);
       if (enemy.hp <= 0) {
@@ -757,10 +788,13 @@ export class GameSession {
   }
 
   hitOpponent(projectile) {
+    if (!Array.isArray(projectile.hitTargets)) projectile.hitTargets = [];
     for (const player of this.livingPlayers()) {
       if (player.id === projectile.ownerId || player.invulnerableFor > 0) continue;
+      if (projectile.hitTargets.includes(player.id)) continue;
       const hitRadius = PLAYER_RADIUS + projectile.radius;
       if (distanceSquared(projectile, player) > hitRadius * hitRadius) continue;
+      projectile.hitTargets.push(player.id);
       this.damagePlayer(player, projectile.damage);
       if (!player.alive) {
         const owner = this.players.get(projectile.ownerId);
@@ -776,7 +810,7 @@ export class GameSession {
   }
 
   damagePlayer(player, damage) {
-    if (!player.alive || player.invulnerableFor > 0) return;
+    if (!player.alive || player.invulnerableFor > 0 || player.disconnected) return;
     let remainingDamage = Math.max(1, damage - player.armor);
     if (player.shield > 0) {
       const absorbed = Math.min(player.shield, remainingDamage);
@@ -985,6 +1019,7 @@ export class GameSession {
     let closest = null;
     let closestDistance = Number.POSITIVE_INFINITY;
     for (const player of this.livingPlayers()) {
+      if (player.disconnected) continue;
       const playerDistance = distanceSquared(point, player);
       if (playerDistance < closestDistance) {
         closest = player;
@@ -1079,7 +1114,7 @@ export class GameSession {
         orbs: player.orbitBlades,
       })),
       enemies: [...this.enemies.values()],
-      projectiles: [...this.projectiles.values()],
+      projectiles: [...this.projectiles.values()].map(({ hitTargets, ...rest }) => rest),
       pickups: [...this.pickups.values()],
     };
   }

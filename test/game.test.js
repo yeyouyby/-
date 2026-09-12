@@ -89,6 +89,54 @@ test("长按跳跃不会自动触发二段跳", () => {
   assert.equal(player.jumps, 1);
 });
 
+test("穿甲弹不会重复命中同一目标", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  const enemy = { id: "e1", x: player.x + 20, y: player.y, radius: 30, hp: 100, maxHp: 100, elite: false };
+  game.enemies.set(enemy.id, enemy);
+  const projectile = {
+    ownerId: player.id,
+    x: enemy.x,
+    y: enemy.y,
+    radius: 6,
+    damage: 10,
+    pierce: 3,
+    hitTargets: [],
+  };
+
+  game.hitEnemy(projectile);
+  const afterFirst = enemy.hp;
+  assert.equal(projectile.hitTargets.length, 1);
+  assert.equal(projectile.pierce, 2);
+
+  // 弹丸仍与目标重叠，下一次不应再次造成伤害
+  game.hitEnemy(projectile);
+  assert.equal(enemy.hp, afterFirst);
+  assert.equal(projectile.hitTargets.length, 1);
+});
+
+test("断线玩家在游戏中不会被伤害或瞄准", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  player.hp = 100;
+  game.markDisconnected(player.id);
+  game.damagePlayer(player, 20);
+  assert.equal(player.hp, 100);
+
+  assert.equal(game.closestLivingPlayer({ x: player.x, y: player.y }), null);
+});
+
+test("重连会迁移玩家席位", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  game.markDisconnected("player-0");
+  assert.equal(game.reconnectPlayer("player-0", "player-0-new"), true);
+  assert.equal(game.players.has("player-0"), false);
+  const migrated = game.players.get("player-0-new");
+  assert.ok(migrated);
+  assert.equal(migrated.disconnected, false);
+});
+
 test("商店会消耗金币并应用强化", () => {
   const { game } = createGame();
   const player = game.players.get("player-0");

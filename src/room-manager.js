@@ -1,12 +1,15 @@
 import { getPlayerClass, MAX_PLAYERS, ROOM_CODE_LENGTH } from "./config.js";
 import { GameSession } from "./game.js";
-import { randomRoomCode, sanitizeName } from "./utils.js";
+import { randomId, randomRoomCode, sanitizeName } from "./utils.js";
+
+const REJOIN_GRACE_MS = 90_000;
 
 export class RoomManager {
   constructor(io, options = {}) {
     this.io = io;
     this.rooms = new Map();
     this.maxPlayers = options.maxPlayers ?? MAX_PLAYERS;
+    this.rejoinGraceMs = options.rejoinGraceMs ?? REJOIN_GRACE_MS;
   }
 
   createRoom(socket, payload = {}) {
@@ -63,6 +66,9 @@ export class RoomManager {
       className: playerClass.name,
       ready: socket.id === room.hostId,
       color: this.playerColor(room.players.size),
+      playerKey: randomId("pk"),
+      disconnected: false,
+      disconnectedAt: null,
     };
     room.players.set(socket.id, player);
     socket.data.roomCode = room.code;
@@ -92,6 +98,77 @@ export class RoomManager {
       room.players.get(room.hostId).ready = true;
     }
     this.broadcastRoom(room);
+  }
+
+  handleDisconnect(socket) {
+    const code = socket.data.roomCode;
+    if (!code) return;
+    const room = this.rooms.get(code);
+    if (!room) return;
+    const player = room.players.get(socket.id);
+    if (!player) return;
+
+    player.disconnected = true;
+    player.disconnectedAt = Date.now();
+    socket.leave(code);
+    socket.data.roomCode = null;
+
+    if (room.hostId === socket.id) {
+      const next = [...room.players.values()].find((candidate) => !candidate.disconnected);
+      if (next) {
+        room.hostId = next.id;
+        next.ready = true;
+      }
+    }
+    room.game?.markDisconnected(socket.id);
+    this.broadcastRoom(room);
+
+    const playerKey = player.playerKey;
+    setTimeout(() => {
+      const current = this.rooms.get(code);
+      if (!current) return;
+      const stale = current.players.get(socket.id);
+      if (!stale || !stale.disconnected || stale.playerKey !== playerKey) return;
+      current.players.delete(socket.id);
+      current.game?.removePlayer(socket.id);
+      if (current.players.size === 0) {
+        current.game?.stop();
+        this.rooms.delete(code);
+        this.broadcastLobby();
+        return;
+      }
+      if (current.hostId === socket.id) {
+        current.hostId = current.players.keys().next().value;
+        current.players.get(current.hostId).ready = true;
+      }
+      this.broadcastRoom(current);
+    }, this.rejoinGraceMs).unref?.();
+  }
+
+  rejoin(socket, payload = {}) {
+    const code = String(payload.code ?? "").trim().toUpperCase();
+    const playerKey = String(payload.playerKey ?? "").trim();
+    const room = this.rooms.get(code);
+    if (!room) throw new Error("房间不存在或已解散");
+    const entry = [...room.players.entries()].find(([, candidate]) => candidate.playerKey === playerKey && candidate.disconnected);
+    if (!entry) throw new Error("无法恢复席位，可能已超时或被移除");
+    const [oldId, player] = entry;
+
+    room.players.delete(oldId);
+    player.id = socket.id;
+    player.disconnected = false;
+    player.disconnectedAt = null;
+    room.players.set(socket.id, player);
+    socket.data.roomCode = code;
+    socket.data.classId = player.classId;
+    socket.join(code);
+
+    if (room.game && !room.game.ended) {
+      room.game.reconnectPlayer(oldId, socket.id);
+    }
+    this.broadcastRoom(room);
+    if (room.game && !room.game.ended) room.game.resendState(socket.id);
+    return room;
   }
 
   toggleReady(socket, ready) {
@@ -155,7 +232,16 @@ export class RoomManager {
       hostId: room.hostId,
       maxPlayers: room.maxPlayers,
       status: room.game ? (room.game.ended ? "ended" : "playing") : "waiting",
-      players: [...room.players.values()],
+      players: [...room.players.values()].map((player) => ({
+        id: player.id,
+        name: player.name,
+        classId: player.classId,
+        className: player.className,
+        ready: player.ready,
+        color: player.color,
+        playerKey: player.playerKey,
+        disconnected: player.disconnected,
+      })),
     };
   }
 

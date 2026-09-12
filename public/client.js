@@ -127,6 +127,7 @@ elements.readyButton.addEventListener("click", () => {
 elements.startButton.addEventListener("click", () => emitWithAck("game:start"));
 $("#leave-room").addEventListener("click", () => {
   socket.emit("room:leave");
+  localStorage.removeItem("lanBattleSession");
   state.room = null;
   showScreen("lobby");
 });
@@ -140,6 +141,20 @@ elements.closeBackpack.addEventListener("click", () => elements.backpackModal.cl
 socket.on("connect", () => {
   elements.connection.textContent = "已连接";
   elements.connection.classList.add("online");
+  // 断线后自动尝试恢复房间席位
+  const saved = JSON.parse(localStorage.getItem("lanBattleSession") || "null");
+  if (saved?.code && saved?.playerKey) {
+    socket.emit("room:rejoin", saved, (response) => {
+      if (response?.ok && response.room) {
+        state.room = response.room;
+        renderRoom(response.room);
+        showToast("已重新连接房间");
+      } else if (response?.error) {
+        localStorage.removeItem("lanBattleSession");
+        showToast(response.error);
+      }
+    });
+  }
 });
 
 socket.on("disconnect", () => {
@@ -322,6 +337,7 @@ function renderRoom(room) {
       ]),
     ]);
     if (player.id === room.hostId) identity.append(el("span", { className: "host-tag", text: "房主" }));
+    if (player.disconnected) identity.append(el("span", { className: "ready-tag waiting", text: "已断线" }));
     elements.playerList.append(
       el("div", { className: "player-row" }, [
         identity,
@@ -331,6 +347,9 @@ function renderRoom(room) {
   }
 
   const self = room.players.find((player) => player.id === socket.id);
+  if (self && !self.disconnected && self.playerKey) {
+    localStorage.setItem("lanBattleSession", JSON.stringify({ code: room.code, playerKey: self.playerKey }));
+  }
   const isHost = room.hostId === socket.id;
   elements.readyButton.classList.toggle("hidden", isHost);
   elements.readyButton.textContent = self?.ready ? "取消准备" : "准备";

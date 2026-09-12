@@ -33,6 +33,7 @@ io.on("connection", (socket) => {
   bind(socket, "room:create", (payload) => roomManager.createRoom(socket, payload));
   bind(socket, "room:join", (payload) => roomManager.joinRoom(socket, payload));
   bind(socket, "room:leave", () => roomManager.leaveRoom(socket));
+  bind(socket, "room:rejoin", (payload) => roomManager.rejoin(socket, payload));
   bind(socket, "room:ready", (payload) => roomManager.toggleReady(socket, payload?.ready));
   bind(socket, "game:start", () => roomManager.startGame(socket));
   bind(socket, "game:replay", () => roomManager.replay(socket));
@@ -40,7 +41,7 @@ io.on("connection", (socket) => {
   socket.on("game:input", (payload) => roomManager.handleInput(socket, payload));
   socket.on("upgrade:choose", (upgradeId) => roomManager.chooseUpgrade(socket, upgradeId));
   socket.on("shop:buy", (itemId) => roomManager.buyShopItem(socket, itemId));
-  socket.on("disconnect", () => roomManager.leaveRoom(socket));
+  socket.on("disconnect", () => roomManager.handleDisconnect(socket));
 });
 
 function bind(socket, event, handler) {

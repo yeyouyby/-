@@ -74,6 +74,39 @@ test("PvP 不允许单人开局", () => {
   assert.throws(() => manager.startGame(host), /至少需要 2 名玩家/);
 });
 
+test("断线玩家保留席位，重连后迁移", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  const room = manager.createRoom(host, { playerName: "房主" });
+  const guest = createSocket("guest");
+  manager.joinRoom(guest, { code: room.code, playerName: "队友" });
+  const playerKey = room.players.get("guest").playerKey;
+
+  manager.handleDisconnect(guest);
+  assert.equal(room.players.get("guest").disconnected, true);
+  assert.equal(room.players.size, 2);
+
+  const guest2 = createSocket("guest2");
+  const rejoined = manager.rejoin(guest2, { code: room.code, playerKey });
+  assert.equal(rejoined.code, room.code);
+  assert.equal(room.players.has("guest"), false);
+  assert.equal(room.players.get("guest2").disconnected, false);
+  assert.equal(guest2.joined.has(room.code), true);
+});
+
+test("无效 playerKey 无法重连", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  const room = manager.createRoom(host, { playerName: "房主" });
+  const guest = createSocket("guest");
+  manager.joinRoom(guest, { code: room.code, playerName: "队友" });
+  manager.handleDisconnect(guest);
+
+  const guest2 = createSocket("guest2");
+  assert.throws(() => manager.rejoin(guest2, { code: room.code, playerKey: "pk_bogus" }), /无法恢复席位/);
+  assert.equal(room.players.size, 2);
+});
+
 test("大厅中的键盘输入不会导致服务端异常", () => {
   const manager = new RoomManager(createIo());
   const visitor = createSocket("visitor");
