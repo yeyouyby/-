@@ -63,9 +63,36 @@ test("职业属性和主动技能由服务端计算", () => {
   assert.ok(guardian.skillCooldown > 0);
 });
 
+test("战斗阶段无法购买", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  player.gold = 100;
+  game.phase = "combat";
+  assert.equal(game.buyShopItem(player.id, "heal"), false);
+});
+
+test("跨多级经验会依次发放升级选择", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  game.addExperience(player, player.xpNeeded * 3);
+  assert.equal(player.level, 3);
+  assert.equal(player.owedUpgrades, 1);
+  assert.equal(player.pendingUpgrade.length, 3);
+});
+
+test("长按跳跃不会自动触发二段跳", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  game.setInput(player.id, { jump: true });
+  for (let i = 0; i < 10; i += 1) game.updatePlayers(1 / 30);
+  // 持续按住跳跃只消耗一次跳跃
+  assert.equal(player.jumps, 1);
+});
+
 test("商店会消耗金币并应用强化", () => {
   const { game } = createGame();
   const player = game.players.get("player-0");
+  game.phase = "peace";
   player.gold = 20;
   const before = player.damage;
 
@@ -178,6 +205,7 @@ test("满级升级不再出现在三选一中", () => {
 test("商店可购买武器与道具", () => {
   const { game } = createGame();
   const player = game.players.get("player-0");
+  game.phase = "peace";
   player.gold = 1000;
 
   const weaponEntry = game.shopStock.find((entry) => entry.kind === "weapon");

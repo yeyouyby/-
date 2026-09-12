@@ -33,8 +33,6 @@ export class RoomManager {
   }
 
   joinRoom(socket, payload = {}) {
-    this.leaveRoom(socket);
-    socket.data.classId = payload.classId;
     const code = String(payload.code ?? "").trim().toUpperCase();
     const room = this.rooms.get(code);
     if (!room) {
@@ -46,6 +44,12 @@ export class RoomManager {
     if (room.players.size >= room.maxPlayers) {
       throw new Error("房间已满");
     }
+    if (socket.data.roomCode === code) {
+      socket.data.classId = payload.classId;
+      return room;
+    }
+    this.leaveRoom(socket);
+    socket.data.classId = payload.classId;
     this.addPlayer(room, socket, payload.playerName);
     return room;
   }
@@ -101,6 +105,7 @@ export class RoomManager {
   startGame(socket) {
     const room = this.getSocketRoom(socket);
     if (room.hostId !== socket.id) throw new Error("只有房主可以开始");
+    if (room.game && !room.game.ended) throw new Error("对局正在进行中");
     if (room.mode === "pvp" && room.players.size < 2) throw new Error("PvP 至少需要 2 名玩家");
     if ([...room.players.values()].some((player) => !player.ready)) {
       throw new Error("仍有玩家未准备");
@@ -116,6 +121,7 @@ export class RoomManager {
 
   replay(socket) {
     const room = this.getSocketRoom(socket);
+    if (room.hostId !== socket.id) throw new Error("只有房主可以重新开始");
     if (!room.game?.ended) throw new Error("当前不能重新开始");
     room.game.stop();
     room.game = null;

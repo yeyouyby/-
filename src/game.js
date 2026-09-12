@@ -172,6 +172,7 @@ export class GameSession {
         xpNeeded: 25,
         pendingUpgrade: null,
         upgradeDeadline: 0,
+        owedUpgrades: 0,
         input: { left: false, right: false, jump: false, skill: false },
       });
       index += 1;
@@ -202,11 +203,12 @@ export class GameSession {
   setInput(playerId, rawInput = {}) {
     const player = this.players.get(playerId);
     if (!player) return;
+    const input = rawInput ?? {};
     player.input = {
-      left: Boolean(rawInput.left),
-      right: Boolean(rawInput.right),
-      jump: Boolean(rawInput.jump),
-      skill: Boolean(rawInput.skill),
+      left: Boolean(input.left),
+      right: Boolean(input.right),
+      jump: Boolean(input.jump),
+      skill: Boolean(input.skill),
     };
   }
 
@@ -221,12 +223,17 @@ export class GameSession {
     player.pendingUpgrade = null;
     player.upgradeDeadline = 0;
     this.io.to(playerId).emit("upgrade:applied", { id: upgradeId, level: player.upgrades[upgradeId] });
+    this.dispatchUpgrades(player);
     return true;
   }
 
   buyShopItem(playerId, itemId) {
     const player = this.players.get(playerId);
     if (!player || !player.alive) return false;
+    if (this.room.mode === "pve" && this.phase !== "peace") {
+      this.io.to(playerId).emit("shop:error", { message: "商店仅在和平时间开放" });
+      return false;
+    }
     const service = SHOP_SERVICES.find((candidate) => candidate.id === itemId);
     if (service) {
       if (player.gold < service.cost) {
@@ -358,8 +365,8 @@ export class GameSession {
 
       // —— 跳跃：输入缓冲 + 土狼时间 + 二段跳 + 可变跳跃高度 ——
       const wantsJump = player.input.jump;
-      if (wantsJump) player.jumpBuffer = JUMP_BUFFER;
-      else player.jumpBuffer = Math.max(0, player.jumpBuffer - dt);
+      if (wantsJump && !player.jumpWasHeld) player.jumpBuffer = JUMP_BUFFER;
+      else if (!wantsJump) player.jumpBuffer = Math.max(0, player.jumpBuffer - dt);
       if (player.grounded) {
         player.coyoteTimer = COYOTE_TIME;
         player.jumps = 0;
@@ -696,7 +703,7 @@ export class GameSession {
         this.defeatEnemy(enemy, owner);
       }
       if (projectile.aoe > 0) {
-        this.explode(projectile, owner);
+        this.explode(projectile, owner, enemy);
         return true;
       }
       if (projectile.pierce > 0) {
@@ -708,8 +715,9 @@ export class GameSession {
     return false;
   }
 
-  explode(projectile, owner) {
+  explode(projectile, owner, exclude) {
     for (const enemy of [...this.enemies.values()]) {
+      if (enemy === exclude) continue;
       if (distanceSquared(projectile, enemy) <= projectile.aoe * projectile.aoe) {
         enemy.hp -= projectile.damage;
         if (enemy.hp <= 0) {
@@ -843,7 +851,8 @@ export class GameSession {
     if (pickup.type === "chest") {
       player.gold += pickup.value;
       this.grantRandomEquipment(player);
-      if (!player.pendingUpgrade) this.offerUpgrade(player);
+      player.owedUpgrades += 1;
+      this.dispatchUpgrades(player);
       this.io.to(player.id).emit("game:event", { type: "chest", gold: pickup.value });
       return;
     }
@@ -893,12 +902,27 @@ export class GameSession {
       player.xp -= player.xpNeeded;
       player.level += 1;
       player.xpNeeded = Math.round(player.xpNeeded * 1.32);
-      if (!player.pendingUpgrade) this.offerUpgrade(player);
+      player.owedUpgrades += 1;
+    }
+    this.dispatchUpgrades(player);
+  }
+
+  dispatchUpgrades(player) {
+    while (player.owedUpgrades > 0 && !player.pendingUpgrade) {
+      player.owedUpgrades -= 1;
+      this.offerUpgrade(player);
     }
   }
 
   offerUpgrade(player) {
     const available = UPGRADE_POOL.filter((upgrade) => (player.upgrades[upgrade.id] ?? 0) < upgrade.maxLevel);
+    if (available.length === 0) {
+      player.pendingUpgrade = null;
+      player.upgradeDeadline = 0;
+      player.gold += 10;
+      this.io.to(player.id).emit("game:event", { type: "pickup", label: "强化已全部满级，获得金币补偿" });
+      return;
+    }
     const choices = this.weightedSample(
       available,
       3,

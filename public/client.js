@@ -9,6 +9,24 @@ const TIERS = [
   { name: "传说", color: "#ff8a36" },
 ];
 
+// 用 DOM API 构建节点（textContent），避免 innerHTML 注入
+function el(tag, options = {}, children = []) {
+  const node = document.createElement(tag);
+  const { className, text, attrs = {}, style } = options;
+  if (className) node.className = className;
+  if (text != null) node.textContent = String(text);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value != null) node.setAttribute(key, String(value));
+  }
+  if (style) {
+    for (const [key, value] of Object.entries(style)) node.style[key] = value;
+  }
+  for (const child of children) {
+    if (child != null) node.append(child);
+  }
+  return node;
+}
+
 const elements = {
   lobby: $("#lobby-screen"),
   room: $("#room-screen"),
@@ -169,23 +187,20 @@ socket.on("game:event", (event) => {
   if (event.type === "bossDefeated") showToast("Boss 已被击败，宝箱已掉落");
 });
 socket.on("upgrade:choices", (choices) => {
-  elements.upgradeOptions.replaceChildren(
-    ...choices.map((choice) => {
-      const tier = TIERS[choice.tier] ?? TIERS[1];
-      const button = document.createElement("button");
-      button.className = "upgrade-card";
-      button.style.borderColor = tier.color;
-      button.innerHTML = `
-        <span class="tier-tag" style="color:${tier.color};border-color:${tier.color}">${tier.name} · Lv.${choice.level}</span>
-        <strong>${escapeHtml(choice.name)}</strong>
-        <span>${escapeHtml(choice.description)}</span>`;
-      button.addEventListener("click", () => {
-        socket.emit("upgrade:choose", choice.id);
-        elements.upgradeModal.classList.add("hidden");
-      });
-      return button;
-    }),
-  );
+  elements.upgradeOptions.replaceChildren();
+  for (const choice of choices) {
+    const tier = TIERS[choice.tier] ?? TIERS[1];
+    const button = el("button", { className: "upgrade-card", style: { borderColor: tier.color } }, [
+      el("span", { className: "tier-tag", text: `${tier.name} · Lv.${choice.level}`, style: { color: tier.color } }),
+      el("strong", { text: choice.name }),
+      el("span", { text: choice.description }),
+    ]);
+    button.addEventListener("click", () => {
+      socket.emit("upgrade:choose", choice.id);
+      elements.upgradeModal.classList.add("hidden");
+    });
+    elements.upgradeOptions.append(button);
+  }
   elements.upgradeModal.classList.remove("hidden");
 });
 socket.on("upgrade:applied", () => elements.upgradeModal.classList.add("hidden"));
@@ -268,24 +283,23 @@ function emitWithAck(event, payload) {
 }
 
 function renderRoomList(rooms) {
+  elements.roomList.replaceChildren();
   if (!rooms.length) {
-    elements.roomList.innerHTML = '<div class="empty-state">附近还没有房间，创建一个吧。</div>';
+    elements.roomList.append(el("div", { className: "empty-state", text: "附近还没有房间，创建一个吧。" }));
     return;
   }
-  elements.roomList.innerHTML = rooms
-    .map(
-      (room) => `
-        <div class="room-row">
-          <div>
-            <strong>${escapeHtml(room.name)}</strong>
-            <small>${room.mode === "pve" ? "合作生存" : "竞技乱斗"} · ${room.code}</small>
-          </div>
-          <span>${room.players}/${room.maxPlayers}</span>
-          <button data-code="${room.code}">加入</button>
-        </div>
-      `,
-    )
-    .join("");
+  for (const room of rooms) {
+    elements.roomList.append(
+      el("div", { className: "room-row" }, [
+        el("div", {}, [
+          el("strong", { text: room.name }),
+          el("small", { text: `${room.mode === "pve" ? "合作生存" : "竞技乱斗"} · ${room.code}` }),
+        ]),
+        el("span", { text: `${room.players}/${room.maxPlayers}` }),
+        el("button", { text: "加入", attrs: { "data-code": room.code } }),
+      ]),
+    );
+  }
 }
 
 function renderRoom(room) {
@@ -298,23 +312,23 @@ function renderRoom(room) {
   elements.missionDescription.textContent = pve
     ? "自动锁定怪物射击，拾取能量升级，波次之间有和平时间可逛商店。"
     : "武器自动锁定附近对手，利用平台和升级建立优势。";
-  elements.playerList.innerHTML = room.players
-    .map(
-      (player) => `
-        <div class="player-row">
-          <div class="player-identity">
-            <span class="avatar" style="background:${player.color}">${escapeHtml(player.name.slice(0, 1))}</span>
-            <div>
-              <strong>${escapeHtml(player.name)}</strong>
-              <small>${escapeHtml(player.className ?? "突击手")}</small>
-            </div>
-            ${player.id === room.hostId ? '<span class="host-tag">房主</span>' : ""}
-          </div>
-          <span class="ready-tag ${player.ready ? "" : "waiting"}">${player.ready ? "已准备" : "等待中"}</span>
-        </div>
-      `,
-    )
-    .join("");
+  elements.playerList.replaceChildren();
+  for (const player of room.players) {
+    const identity = el("div", { className: "player-identity" }, [
+      el("span", { className: "avatar", text: player.name.slice(0, 1), style: { background: player.color } }),
+      el("div", {}, [
+        el("strong", { text: player.name }),
+        el("small", { text: player.className ?? "突击手" }),
+      ]),
+    ]);
+    if (player.id === room.hostId) identity.append(el("span", { className: "host-tag", text: "房主" }));
+    elements.playerList.append(
+      el("div", { className: "player-row" }, [
+        identity,
+        el("span", { className: `ready-tag ${player.ready ? "" : "waiting"}`, text: player.ready ? "已准备" : "等待中" }),
+      ]),
+    );
+  }
 
   const self = room.players.find((player) => player.id === socket.id);
   const isHost = room.hostId === socket.id;
@@ -350,25 +364,24 @@ function renderHud(snapshot) {
   } else {
     elements.phaseLabel.classList.add("hidden");
   }
-  elements.scoreboard.innerHTML = snapshot.players
-    .map(
-      (player) => `
-        <div class="score-row">
-          <i style="background:${player.color}"></i>
-          <span>${escapeHtml(player.name)} · ${escapeHtml(player.className)} · Lv.${player.level}</span>
-          <strong>${player.kills} / ${player.gold}G</strong>
-        </div>
-      `,
-    )
-    .join("");
+  elements.scoreboard.replaceChildren();
+  for (const player of snapshot.players) {
+    elements.scoreboard.append(
+      el("div", { className: "score-row" }, [
+        el("i", { style: { background: player.color } }),
+        el("span", { text: `${player.name} · ${player.className} · Lv.${player.level}` }),
+        el("strong", { text: `${player.kills} / ${player.gold}G` }),
+      ]),
+    );
+  }
   const self = snapshot.players.find((player) => player.id === socket.id);
   if (self) {
     const cooldown = Math.ceil(self.skillCooldown);
-    elements.skillPanel.innerHTML = `
-      <strong>${escapeHtml(self.skillName)}</strong>
-      <span>${cooldown > 0 ? `${cooldown}s 后可用` : "E 键可用"}</span>
-      · 护盾 ${Math.ceil(self.shield)} · 护甲 ${self.armor}
-    `;
+    elements.skillPanel.replaceChildren(
+      el("strong", { text: self.skillName }),
+      el("span", { text: cooldown > 0 ? `${cooldown}s 后可用` : "E 键可用" }),
+      document.createTextNode(` · 护盾 ${Math.ceil(self.shield)} · 护甲 ${self.armor}`),
+    );
     elements.statsName.textContent = self.name;
     elements.statsLevel.textContent = `Lv.${self.level}`;
     elements.statsGold.textContent = self.gold;
@@ -380,65 +393,59 @@ function renderHud(snapshot) {
 function renderShopModal() {
   const self = state.snapshot?.players.find((player) => player.id === socket.id);
   const gold = self?.gold ?? 0;
-  elements.shopGold.textContent = `${gold} 金币`;
-  elements.shopServices.innerHTML = state.services
-    .map(
-      (service) => `
-        <button class="shop-item" data-buy="${service.id}" ${gold < service.cost ? "disabled" : ""}>
-          <strong>${escapeHtml(service.name)} · ${service.cost}G</strong>
-          <span>${escapeHtml(service.description)}</span>
-        </button>
-      `,
-    )
-    .join("");
-  elements.shopStock.innerHTML = state.stock
-    .map((entry) => {
-      const tier = TIERS[entry.tier] ?? TIERS[1];
-      return `
-        <button class="shop-item" data-buy="${entry.id}" ${gold < entry.cost ? "disabled" : ""} style="border-color:${tier.color}55">
-          <strong>${escapeHtml(entry.name)} · ${entry.cost}G <em class="tier-tag" style="color:${tier.color}">${tier.name}</em></strong>
-          <span>${escapeHtml(entry.description)}</span>
-        </button>
-      `;
-    })
-    .join("");
-  elements.shopModal.querySelectorAll("[data-buy]").forEach((button) => {
-    button.addEventListener("click", () => socket.emit("shop:buy", button.dataset.buy));
-  });
+  const canShop = state.room?.mode !== "pve" || state.snapshot?.phase === "peace";
+  elements.shopGold.textContent = `${gold} 金币${canShop ? "" : "（仅和平时间可购买）"}`;
+  elements.shopServices.replaceChildren();
+  for (const service of state.services) {
+    const button = el("button", { className: "shop-item", attrs: { "data-buy": service.id } }, [
+      el("strong", { text: `${service.name} · ${service.cost}G` }),
+      el("span", { text: service.description }),
+    ]);
+    button.disabled = !canShop || gold < service.cost;
+    button.addEventListener("click", () => socket.emit("shop:buy", service.id));
+    elements.shopServices.append(button);
+  }
+  elements.shopStock.replaceChildren();
+  for (const entry of state.stock) {
+    const tier = TIERS[entry.tier] ?? TIERS[1];
+    const strong = el("strong", { text: `${entry.name} · ${entry.cost}G` });
+    strong.append(el("em", { className: "tier-tag", text: tier.name, style: { color: tier.color } }));
+    const button = el("button", {
+      className: "shop-item",
+      attrs: { "data-buy": entry.id },
+      style: { borderColor: `${tier.color}55` },
+    }, [strong, el("span", { text: entry.description })]);
+    button.disabled = !canShop || gold < entry.cost;
+    button.addEventListener("click", () => socket.emit("shop:buy", entry.id));
+    elements.shopStock.append(button);
+  }
+}
+
+function invRow(kind, tier, name, detail) {
+  const tierInfo = TIERS[tier] ?? TIERS[1];
+  return el("div", { className: "inv-row" }, [
+    el("span", { className: "inv-tag", text: kind, style: { color: tierInfo.color } }),
+    el("strong", { text: name }),
+    el("span", { text: detail }),
+  ]);
 }
 
 function renderBackpack() {
   const self = state.snapshot?.players.find((player) => player.id === socket.id);
   if (!self) return;
-  const weaponRows = self.weapons
-    .map((weapon) => {
-      const tier = TIERS[weapon.tier] ?? TIERS[1];
-      return `<div class="inv-row"><span class="inv-tag" style="color:${tier.color};border-color:${tier.color}">武器</span>
-        <strong>${escapeHtml(weapon.name)}</strong><span>Lv.${weapon.level}</span></div>`;
-    })
-    .join("");
-  const itemRows = self.items
-    .map((item) => {
-      const tier = TIERS[item.tier] ?? TIERS[1];
-      return `<div class="inv-row"><span class="inv-tag" style="color:${tier.color};border-color:${tier.color}">道具</span>
-        <strong>${escapeHtml(item.name)}</strong><span>×${item.count}</span></div>`;
-    })
-    .join("");
-  const upgradeRows = self.upgrades
-    .map((upgrade) => {
-      const tier = TIERS[upgrade.tier] ?? TIERS[1];
-      return `<div class="inv-row"><span class="inv-tag" style="color:${tier.color};border-color:${tier.color}">强化</span>
-        <strong>${escapeHtml(upgrade.name)}</strong><span>Lv.${upgrade.level}</span></div>`;
-    })
-    .join("");
-  elements.backpackContent.innerHTML = `
-    <div class="inv-section-title">武器（${self.weapons.length}）</div>
-    ${weaponRows || '<div class="inv-empty">暂无武器</div>'}
-    <div class="inv-section-title">道具（${self.items.length}）</div>
-    ${itemRows || '<div class="inv-empty">暂无道具</div>'}
-    <div class="inv-section-title">强化（${self.upgrades.length}）</div>
-    ${upgradeRows || '<div class="inv-empty">暂无强化</div>'}
-  `;
+  elements.backpackContent.replaceChildren();
+
+  elements.backpackContent.append(el("div", { className: "inv-section-title", text: `武器（${self.weapons.length}）` }));
+  if (!self.weapons.length) elements.backpackContent.append(el("div", { className: "inv-empty", text: "暂无武器" }));
+  else for (const weapon of self.weapons) elements.backpackContent.append(invRow("武器", weapon.tier, weapon.name, `Lv.${weapon.level}`));
+
+  elements.backpackContent.append(el("div", { className: "inv-section-title", text: `道具（${self.items.length}）` }));
+  if (!self.items.length) elements.backpackContent.append(el("div", { className: "inv-empty", text: "暂无道具" }));
+  else for (const item of self.items) elements.backpackContent.append(invRow("道具", item.tier, item.name, `×${item.count}`));
+
+  elements.backpackContent.append(el("div", { className: "inv-section-title", text: `强化（${self.upgrades.length}）` }));
+  if (!self.upgrades.length) elements.backpackContent.append(el("div", { className: "inv-empty", text: "暂无强化" }));
+  else for (const upgrade of self.upgrades) elements.backpackContent.append(invRow("强化", upgrade.tier, upgrade.name, `Lv.${upgrade.level}`));
 }
 
 function draw() {
@@ -653,12 +660,6 @@ function showToast(message) {
   elements.toast.textContent = message;
   elements.toast.classList.remove("hidden");
   state.toastTimer = setTimeout(() => elements.toast.classList.add("hidden"), 2600);
-}
-
-function escapeHtml(value) {
-  const node = document.createElement("span");
-  node.textContent = String(value);
-  return node.innerHTML;
 }
 
 resizeCanvas();
