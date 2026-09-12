@@ -1,0 +1,665 @@
+const socket = io();
+const $ = (selector) => document.querySelector(selector);
+
+const TIERS = [
+  null,
+  { name: "普通", color: "#9aa7b5" },
+  { name: "稀有", color: "#68d8e8" },
+  { name: "史诗", color: "#c56cf0" },
+  { name: "传说", color: "#ff8a36" },
+];
+
+const elements = {
+  lobby: $("#lobby-screen"),
+  room: $("#room-screen"),
+  game: $("#game-screen"),
+  name: $("#player-name"),
+  playerClass: $("#player-class"),
+  roomName: $("#room-name"),
+  roomCode: $("#room-code"),
+  maxPlayers: $("#max-players"),
+  roomList: $("#room-list"),
+  connection: $("#connection-status"),
+  currentRoomName: $("#current-room-name"),
+  currentRoomCode: $("#current-room-code"),
+  roomCapacity: $("#room-capacity"),
+  roomModeBadge: $("#room-mode-badge"),
+  missionTitle: $("#mission-title"),
+  missionDescription: $("#mission-description"),
+  playerList: $("#player-list"),
+  readyButton: $("#ready-button"),
+  startButton: $("#start-button"),
+  canvas: $("#game-canvas"),
+  waveLabel: $("#wave-label"),
+  timerLabel: $("#timer-label"),
+  phaseLabel: $("#phase-label"),
+  scoreboard: $("#scoreboard"),
+  skillPanel: $("#skill-panel"),
+  statsName: $("#stats-name"),
+  statsLevel: $("#stats-level"),
+  statsGold: $("#stats-gold"),
+  statsHpFill: $("#stats-hp-fill"),
+  statsXpFill: $("#stats-xp-fill"),
+  openShop: $("#open-shop"),
+  openBackpack: $("#open-backpack"),
+  shopModal: $("#shop-modal"),
+  shopGold: $("#shop-gold"),
+  shopServices: $("#shop-services"),
+  shopStock: $("#shop-stock"),
+  closeShop: $("#close-shop"),
+  backpackModal: $("#backpack-modal"),
+  backpackContent: $("#backpack-content"),
+  closeBackpack: $("#close-backpack"),
+  upgradeModal: $("#upgrade-modal"),
+  upgradeOptions: $("#upgrade-options"),
+  resultModal: $("#result-modal"),
+  resultTitle: $("#result-title"),
+  toast: $("#toast"),
+};
+
+const context = elements.canvas.getContext("2d");
+const state = {
+  selectedMode: "pve",
+  room: null,
+  map: null,
+  services: [],
+  stock: [],
+  snapshot: null,
+  keys: { left: false, right: false, jump: false, skill: false },
+  toastTimer: null,
+};
+
+elements.name.value = localStorage.getItem("lanBattleName") || "";
+
+document.querySelectorAll(".mode-card").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll(".mode-card").forEach((candidate) => candidate.classList.remove("active"));
+    button.classList.add("active");
+    state.selectedMode = button.dataset.mode;
+  });
+});
+
+$("#create-room").addEventListener("click", () => {
+  const playerName = getPlayerName();
+  if (!playerName) return;
+  emitWithAck("room:create", {
+    playerName,
+    classId: elements.playerClass.value,
+    roomName: elements.roomName.value,
+    mode: state.selectedMode,
+    maxPlayers: Number(elements.maxPlayers.value),
+  });
+});
+
+$("#join-room").addEventListener("click", () => joinRoom(elements.roomCode.value));
+elements.roomCode.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") joinRoom(elements.roomCode.value);
+});
+
+elements.roomList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-code]");
+  if (button) joinRoom(button.dataset.code);
+});
+
+elements.readyButton.addEventListener("click", () => {
+  const self = state.room?.players.find((player) => player.id === socket.id);
+  socket.emit("room:ready", { ready: !self?.ready });
+});
+
+elements.startButton.addEventListener("click", () => emitWithAck("game:start"));
+$("#leave-room").addEventListener("click", () => {
+  socket.emit("room:leave");
+  state.room = null;
+  showScreen("lobby");
+});
+$("#return-room").addEventListener("click", () => emitWithAck("game:replay"));
+
+elements.openShop.addEventListener("click", () => toggleShop());
+elements.openBackpack.addEventListener("click", () => toggleBackpack());
+elements.closeShop.addEventListener("click", () => elements.shopModal.classList.add("hidden"));
+elements.closeBackpack.addEventListener("click", () => elements.backpackModal.classList.add("hidden"));
+
+socket.on("connect", () => {
+  elements.connection.textContent = "已连接";
+  elements.connection.classList.add("online");
+});
+
+socket.on("disconnect", () => {
+  elements.connection.textContent = "连接断开";
+  elements.connection.classList.remove("online");
+  showToast("与服务器的连接已断开");
+});
+
+socket.on("lobby:rooms", renderRoomList);
+socket.on("room:state", (room) => {
+  state.room = room;
+  renderRoom(room);
+  if (room.status === "waiting") {
+    elements.resultModal.classList.add("hidden");
+    showScreen("room");
+  }
+});
+socket.on("game:start", ({ map, mode }) => {
+  state.map = map;
+  state.snapshot = null;
+  elements.upgradeModal.classList.add("hidden");
+  elements.shopModal.classList.add("hidden");
+  elements.backpackModal.classList.add("hidden");
+  elements.resultModal.classList.add("hidden");
+  elements.waveLabel.textContent = mode === "pve" ? "第 1 波" : "竞技乱斗";
+  elements.phaseLabel.classList.add("hidden");
+  showScreen("game");
+  resizeCanvas();
+});
+socket.on("game:snapshot", (snapshot) => {
+  state.snapshot = snapshot;
+  renderHud(snapshot);
+});
+socket.on("shop:stock", ({ services, stock }) => {
+  state.services = services ?? [];
+  state.stock = stock ?? [];
+  renderShopModal();
+});
+socket.on("game:event", (event) => {
+  if (event.type === "wave") showToast(`第 ${event.wave} 波来袭`);
+  if (event.type === "peace") showToast(`第 ${event.wave} 波已清除，和平时间，可打开商店（Tab）`);
+  if (event.type === "skill") showToast(`${event.skillName} 已释放`);
+  if (event.type === "chest") showToast(`宝箱获得 ${event.gold} 金币与装备`);
+  if (event.type === "pickup") showToast(event.label);
+  if (event.type === "bossDefeated") showToast("Boss 已被击败，宝箱已掉落");
+});
+socket.on("upgrade:choices", (choices) => {
+  elements.upgradeOptions.replaceChildren(
+    ...choices.map((choice) => {
+      const tier = TIERS[choice.tier] ?? TIERS[1];
+      const button = document.createElement("button");
+      button.className = "upgrade-card";
+      button.style.borderColor = tier.color;
+      button.innerHTML = `
+        <span class="tier-tag" style="color:${tier.color};border-color:${tier.color}">${tier.name} · Lv.${choice.level}</span>
+        <strong>${escapeHtml(choice.name)}</strong>
+        <span>${escapeHtml(choice.description)}</span>`;
+      button.addEventListener("click", () => {
+        socket.emit("upgrade:choose", choice.id);
+        elements.upgradeModal.classList.add("hidden");
+      });
+      return button;
+    }),
+  );
+  elements.upgradeModal.classList.remove("hidden");
+});
+socket.on("upgrade:applied", () => elements.upgradeModal.classList.add("hidden"));
+socket.on("shop:bought", () => {
+  showToast("购买成功");
+  renderShopModal();
+});
+socket.on("shop:error", ({ message }) => showToast(message));
+socket.on("game:end", (result) => {
+  elements.resultTitle.textContent = result.title;
+  elements.resultModal.classList.remove("hidden");
+  elements.shopModal.classList.add("hidden");
+  elements.backpackModal.classList.add("hidden");
+});
+socket.on("server:error", ({ message }) => showToast(message));
+
+window.addEventListener("resize", resizeCanvas);
+window.addEventListener("keydown", (event) => updateKey(event, true));
+window.addEventListener("keyup", (event) => updateKey(event, false));
+
+function updateKey(event, active) {
+  if (elements.game.classList.contains("hidden")) return;
+  if (["KeyA", "KeyD", "KeyW", "KeyE", "KeyB", "ArrowLeft", "ArrowRight", "ArrowUp", "Space", "Tab"].includes(event.code)) {
+    event.preventDefault();
+  }
+  if (event.code === "Tab" && active) {
+    toggleShop();
+    return;
+  }
+  if (event.code === "KeyB" && active) {
+    toggleBackpack();
+    return;
+  }
+  if (event.code === "KeyA" || event.code === "ArrowLeft") state.keys.left = active;
+  if (event.code === "KeyD" || event.code === "ArrowRight") state.keys.right = active;
+  if (event.code === "KeyW" || event.code === "ArrowUp" || event.code === "Space") state.keys.jump = active;
+  if (event.code === "KeyE") state.keys.skill = active;
+  socket.emit("game:input", state.keys);
+}
+
+function toggleShop() {
+  const hidden = elements.shopModal.classList.toggle("hidden");
+  if (!hidden) renderShopModal();
+}
+
+function toggleBackpack() {
+  const hidden = elements.backpackModal.classList.toggle("hidden");
+  if (!hidden) renderBackpack();
+}
+
+function joinRoom(code) {
+  const playerName = getPlayerName();
+  if (!playerName) return;
+  emitWithAck("room:join", { playerName, classId: elements.playerClass.value, code: String(code).trim().toUpperCase() });
+}
+
+function getPlayerName() {
+  const name = elements.name.value.trim();
+  if (!name) {
+    showToast("请先输入战士代号");
+    elements.name.focus();
+    return null;
+  }
+  localStorage.setItem("lanBattleName", name);
+  return name;
+}
+
+function emitWithAck(event, payload) {
+  socket.emit(event, payload, (response) => {
+    if (!response?.ok) {
+      showToast(response?.error || "操作失败");
+      return;
+    }
+    if (response.room && event !== "game:start") {
+      state.room = response.room;
+      renderRoom(response.room);
+      showScreen("room");
+    }
+  });
+}
+
+function renderRoomList(rooms) {
+  if (!rooms.length) {
+    elements.roomList.innerHTML = '<div class="empty-state">附近还没有房间，创建一个吧。</div>';
+    return;
+  }
+  elements.roomList.innerHTML = rooms
+    .map(
+      (room) => `
+        <div class="room-row">
+          <div>
+            <strong>${escapeHtml(room.name)}</strong>
+            <small>${room.mode === "pve" ? "合作生存" : "竞技乱斗"} · ${room.code}</small>
+          </div>
+          <span>${room.players}/${room.maxPlayers}</span>
+          <button data-code="${room.code}">加入</button>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderRoom(room) {
+  elements.currentRoomName.textContent = room.name;
+  elements.currentRoomCode.textContent = room.code;
+  elements.roomCapacity.textContent = `${room.players.length} / ${room.maxPlayers}`;
+  const pve = room.mode === "pve";
+  elements.roomModeBadge.textContent = pve ? "合作生存" : "竞技乱斗";
+  elements.missionTitle.textContent = pve ? "坚守五个波次" : "成为最后的幸存者";
+  elements.missionDescription.textContent = pve
+    ? "自动锁定怪物射击，拾取能量升级，波次之间有和平时间可逛商店。"
+    : "武器自动锁定附近对手，利用平台和升级建立优势。";
+  elements.playerList.innerHTML = room.players
+    .map(
+      (player) => `
+        <div class="player-row">
+          <div class="player-identity">
+            <span class="avatar" style="background:${player.color}">${escapeHtml(player.name.slice(0, 1))}</span>
+            <div>
+              <strong>${escapeHtml(player.name)}</strong>
+              <small>${escapeHtml(player.className ?? "突击手")}</small>
+            </div>
+            ${player.id === room.hostId ? '<span class="host-tag">房主</span>' : ""}
+          </div>
+          <span class="ready-tag ${player.ready ? "" : "waiting"}">${player.ready ? "已准备" : "等待中"}</span>
+        </div>
+      `,
+    )
+    .join("");
+
+  const self = room.players.find((player) => player.id === socket.id);
+  const isHost = room.hostId === socket.id;
+  elements.readyButton.classList.toggle("hidden", isHost);
+  elements.readyButton.textContent = self?.ready ? "取消准备" : "准备";
+  elements.startButton.classList.toggle("hidden", !isHost);
+  elements.startButton.disabled =
+    room.players.some((player) => !player.ready) || (room.mode === "pvp" && room.players.length < 2);
+}
+
+function showScreen(name) {
+  elements.lobby.classList.toggle("hidden", name !== "lobby");
+  elements.room.classList.toggle("hidden", name !== "room");
+  elements.game.classList.toggle("hidden", name !== "game");
+}
+
+function resizeCanvas() {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  elements.canvas.width = Math.round(window.innerWidth * ratio);
+  elements.canvas.height = Math.round(window.innerHeight * ratio);
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
+
+function renderHud(snapshot) {
+  const remaining = Math.max(0, snapshot.duration - snapshot.elapsed);
+  const minutes = Math.floor(remaining / 60);
+  const seconds = Math.floor(remaining % 60);
+  elements.timerLabel.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  if (state.room?.mode === "pve") elements.waveLabel.textContent = `第 ${snapshot.wave} 波`;
+  if (snapshot.phase === "peace") {
+    elements.phaseLabel.textContent = `和平时间 ${Math.ceil(snapshot.phaseTimer)}s · Tab 打开商店`;
+    elements.phaseLabel.classList.remove("hidden");
+  } else {
+    elements.phaseLabel.classList.add("hidden");
+  }
+  elements.scoreboard.innerHTML = snapshot.players
+    .map(
+      (player) => `
+        <div class="score-row">
+          <i style="background:${player.color}"></i>
+          <span>${escapeHtml(player.name)} · ${escapeHtml(player.className)} · Lv.${player.level}</span>
+          <strong>${player.kills} / ${player.gold}G</strong>
+        </div>
+      `,
+    )
+    .join("");
+  const self = snapshot.players.find((player) => player.id === socket.id);
+  if (self) {
+    const cooldown = Math.ceil(self.skillCooldown);
+    elements.skillPanel.innerHTML = `
+      <strong>${escapeHtml(self.skillName)}</strong>
+      <span>${cooldown > 0 ? `${cooldown}s 后可用` : "E 键可用"}</span>
+      · 护盾 ${Math.ceil(self.shield)} · 护甲 ${self.armor}
+    `;
+    elements.statsName.textContent = self.name;
+    elements.statsLevel.textContent = `Lv.${self.level}`;
+    elements.statsGold.textContent = self.gold;
+    elements.statsHpFill.style.width = `${Math.max(0, Math.min(100, (self.hp / self.maxHp) * 100))}%`;
+    elements.statsXpFill.style.width = `${Math.max(0, Math.min(100, (self.xp / self.xpNeeded) * 100))}%`;
+  }
+}
+
+function renderShopModal() {
+  const self = state.snapshot?.players.find((player) => player.id === socket.id);
+  const gold = self?.gold ?? 0;
+  elements.shopGold.textContent = `${gold} 金币`;
+  elements.shopServices.innerHTML = state.services
+    .map(
+      (service) => `
+        <button class="shop-item" data-buy="${service.id}" ${gold < service.cost ? "disabled" : ""}>
+          <strong>${escapeHtml(service.name)} · ${service.cost}G</strong>
+          <span>${escapeHtml(service.description)}</span>
+        </button>
+      `,
+    )
+    .join("");
+  elements.shopStock.innerHTML = state.stock
+    .map((entry) => {
+      const tier = TIERS[entry.tier] ?? TIERS[1];
+      return `
+        <button class="shop-item" data-buy="${entry.id}" ${gold < entry.cost ? "disabled" : ""} style="border-color:${tier.color}55">
+          <strong>${escapeHtml(entry.name)} · ${entry.cost}G <em class="tier-tag" style="color:${tier.color}">${tier.name}</em></strong>
+          <span>${escapeHtml(entry.description)}</span>
+        </button>
+      `;
+    })
+    .join("");
+  elements.shopModal.querySelectorAll("[data-buy]").forEach((button) => {
+    button.addEventListener("click", () => socket.emit("shop:buy", button.dataset.buy));
+  });
+}
+
+function renderBackpack() {
+  const self = state.snapshot?.players.find((player) => player.id === socket.id);
+  if (!self) return;
+  const weaponRows = self.weapons
+    .map((weapon) => {
+      const tier = TIERS[weapon.tier] ?? TIERS[1];
+      return `<div class="inv-row"><span class="inv-tag" style="color:${tier.color};border-color:${tier.color}">武器</span>
+        <strong>${escapeHtml(weapon.name)}</strong><span>Lv.${weapon.level}</span></div>`;
+    })
+    .join("");
+  const itemRows = self.items
+    .map((item) => {
+      const tier = TIERS[item.tier] ?? TIERS[1];
+      return `<div class="inv-row"><span class="inv-tag" style="color:${tier.color};border-color:${tier.color}">道具</span>
+        <strong>${escapeHtml(item.name)}</strong><span>×${item.count}</span></div>`;
+    })
+    .join("");
+  const upgradeRows = self.upgrades
+    .map((upgrade) => {
+      const tier = TIERS[upgrade.tier] ?? TIERS[1];
+      return `<div class="inv-row"><span class="inv-tag" style="color:${tier.color};border-color:${tier.color}">强化</span>
+        <strong>${escapeHtml(upgrade.name)}</strong><span>Lv.${upgrade.level}</span></div>`;
+    })
+    .join("");
+  elements.backpackContent.innerHTML = `
+    <div class="inv-section-title">武器（${self.weapons.length}）</div>
+    ${weaponRows || '<div class="inv-empty">暂无武器</div>'}
+    <div class="inv-section-title">道具（${self.items.length}）</div>
+    ${itemRows || '<div class="inv-empty">暂无道具</div>'}
+    <div class="inv-section-title">强化（${self.upgrades.length}）</div>
+    ${upgradeRows || '<div class="inv-empty">暂无强化</div>'}
+  `;
+}
+
+function draw() {
+  requestAnimationFrame(draw);
+  if (!state.map || !state.snapshot || elements.game.classList.contains("hidden")) return;
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const localPlayer = state.snapshot.players.find((player) => player.id === socket.id);
+  const cameraX = Math.max(0, Math.min(state.map.width - width, (localPlayer?.x ?? state.map.width / 2) - width / 2));
+  const scaleY = height / state.map.height;
+
+  context.clearRect(0, 0, width, height);
+  drawBackground(width, height, cameraX);
+  context.save();
+  context.translate(-cameraX, 0);
+  context.scale(1, scaleY);
+  drawWorld();
+  context.restore();
+}
+
+function drawBackground(width, height, cameraX) {
+  const gradient = context.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, "#17283b");
+  gradient.addColorStop(0.65, "#263a46");
+  gradient.addColorStop(1, "#1a2028");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
+
+  context.fillStyle = "rgba(255, 163, 76, 0.72)";
+  context.beginPath();
+  context.arc(width * 0.78 - cameraX * 0.04, height * 0.22, 58, 0, Math.PI * 2);
+  context.fill();
+
+  for (let layer = 0; layer < 3; layer += 1) {
+    context.beginPath();
+    context.moveTo(0, height);
+    const offset = -(cameraX * (0.05 + layer * 0.04)) % 420;
+    for (let x = offset - 420; x < width + 420; x += 210) {
+      context.lineTo(x, height * (0.58 + layer * 0.09));
+      context.lineTo(x + 105, height * (0.46 + layer * 0.1));
+      context.lineTo(x + 210, height * (0.58 + layer * 0.09));
+    }
+    context.lineTo(width, height);
+    context.fillStyle = [`#1a2d38`, `#172832`, `#14232b`][layer];
+    context.fill();
+  }
+}
+
+function drawWorld() {
+  // 背景装饰（立柱与岩石）
+  for (const deco of state.map.decorations ?? []) {
+    context.fillStyle = "rgba(30, 42, 52, 0.55)";
+    if (deco.type === "pillar") {
+      context.fillRect(deco.x, deco.y - deco.h, deco.w, deco.h);
+      context.fillStyle = "rgba(45, 60, 70, 0.55)";
+      context.fillRect(deco.x - 6, deco.y - deco.h, deco.w + 12, 8);
+    } else {
+      context.beginPath();
+      context.ellipse(deco.x, deco.y, deco.w / 2, deco.h / 2, 0, Math.PI, 0);
+      context.fill();
+    }
+  }
+
+  context.fillStyle = "#263236";
+  context.fillRect(0, state.map.groundY, state.map.width, state.map.height - state.map.groundY);
+  context.fillStyle = "#3c4b48";
+  context.fillRect(0, state.map.groundY, state.map.width, 7);
+
+  for (const platform of state.map.platforms) {
+    context.fillStyle = "#34444a";
+    context.fillRect(platform.x, platform.y, platform.width, platform.height);
+    context.fillStyle = "#65736a";
+    context.fillRect(platform.x, platform.y, platform.width, 5);
+  }
+
+  for (const pickup of state.snapshot.pickups) {
+    drawPickup(pickup);
+  }
+
+  for (const projectile of state.snapshot.projectiles) {
+    context.fillStyle = projectile.color || "#ffd166";
+    context.shadowColor = projectile.color || "#ff9f43";
+    context.shadowBlur = 9;
+    context.beginPath();
+    context.arc(projectile.x, projectile.y, projectile.radius, 0, Math.PI * 2);
+    context.fill();
+    context.shadowBlur = 0;
+  }
+
+  for (const enemy of state.snapshot.enemies) drawEnemy(enemy);
+  for (const player of state.snapshot.players) {
+    drawPlayer(player);
+    drawOrbs(player);
+  }
+}
+
+function drawPickup(pickup) {
+  context.save();
+  if (pickup.type === "chest") {
+    context.fillStyle = "#ffb86b";
+    context.shadowColor = "#ff8a36";
+    context.shadowBlur = 20;
+    context.beginPath();
+    context.arc(pickup.x, pickup.y, 13, 0, Math.PI * 2);
+    context.fill();
+    context.strokeStyle = "#3d220f";
+    context.lineWidth = 3;
+    context.strokeRect(pickup.x - 12, pickup.y - 9, 24, 18);
+  } else if (pickup.type === "gold") {
+    context.fillStyle = "#ffd166";
+    context.shadowColor = "#ffd166";
+    context.shadowBlur = 14;
+    context.beginPath();
+    context.arc(pickup.x, pickup.y, 8, 0, Math.PI * 2);
+    context.fill();
+  } else if (pickup.type === "weapon") {
+    context.fillStyle = "#ff8a36";
+    context.shadowColor = "#ff8a36";
+    context.shadowBlur = 16;
+    context.translate(pickup.x, pickup.y);
+    context.rotate(Math.PI / 4);
+    context.fillRect(-8, -8, 16, 16);
+  } else if (pickup.type === "item") {
+    context.fillStyle = "#c56cf0";
+    context.shadowColor = "#c56cf0";
+    context.shadowBlur = 16;
+    context.fillRect(pickup.x - 8, pickup.y - 8, 16, 16);
+  } else {
+    context.fillStyle = "#79f2cb";
+    context.shadowColor = "#79f2cb";
+    context.shadowBlur = 14;
+    context.beginPath();
+    context.arc(pickup.x, pickup.y, 7, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.restore();
+}
+
+function drawEnemy(enemy) {
+  context.fillStyle = enemy.boss ? "#ff8a36" : enemy.elite ? "#c56cf0" : "#ff596d";
+  context.beginPath();
+  context.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2);
+  context.fill();
+  if (enemy.boss) {
+    context.strokeStyle = "#ffe0ad";
+    context.lineWidth = 5;
+    context.stroke();
+  }
+  context.fillStyle = "#10151b";
+  context.beginPath();
+  context.arc(enemy.x - 7, enemy.y - 4, 3, 0, Math.PI * 2);
+  context.arc(enemy.x + 7, enemy.y - 4, 3, 0, Math.PI * 2);
+  context.fill();
+  drawHealthBar(enemy.x, enemy.y - enemy.radius - 13, enemy.hp / enemy.maxHp, enemy.radius * 2);
+}
+
+function drawPlayer(player) {
+  context.save();
+  context.globalAlpha = player.alive ? 1 : 0.32;
+  context.fillStyle = player.color;
+  context.beginPath();
+  context.roundRect(player.x - 21, player.y - 25, 42, 50, 13);
+  context.fill();
+  context.fillStyle = "#121820";
+  const eyeX = player.x + player.facing * 8;
+  context.beginPath();
+  context.arc(eyeX, player.y - 7, 4, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
+  drawHealthBar(player.x, player.y - 38, player.hp / player.maxHp, 50);
+  context.fillStyle = "#fff";
+  context.font = "600 12px Inter, sans-serif";
+  context.textAlign = "center";
+  context.fillText(player.alive ? player.name : `${player.name} (${Math.ceil(player.downFor)})`, player.x, player.y - 48);
+  if (player.id === socket.id) {
+    context.strokeStyle = "#fff";
+    context.lineWidth = 2;
+    context.beginPath();
+    context.arc(player.x, player.y, 30, 0, Math.PI * 2);
+    context.stroke();
+  }
+  if (player.shield > 0) {
+    context.strokeStyle = "rgba(104,216,232,.72)";
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(player.x, player.y, 35, 0, Math.PI * 2);
+    context.stroke();
+  }
+}
+
+function drawOrbs(player) {
+  for (const orb of player.orbs ?? []) {
+    context.fillStyle = orb.color || "#7bed9f";
+    context.shadowColor = orb.color || "#7bed9f";
+    context.shadowBlur = 12;
+    context.beginPath();
+    context.arc(orb.x, orb.y, orb.radius, 0, Math.PI * 2);
+    context.fill();
+    context.shadowBlur = 0;
+  }
+}
+
+function drawHealthBar(x, y, ratio, width) {
+  context.fillStyle = "rgba(0,0,0,.55)";
+  context.fillRect(x - width / 2, y, width, 5);
+  context.fillStyle = ratio > 0.35 ? "#6de09c" : "#ff596d";
+  context.fillRect(x - width / 2, y, width * Math.max(0, ratio), 5);
+}
+
+function showToast(message) {
+  clearTimeout(state.toastTimer);
+  elements.toast.textContent = message;
+  elements.toast.classList.remove("hidden");
+  state.toastTimer = setTimeout(() => elements.toast.classList.add("hidden"), 2600);
+}
+
+function escapeHtml(value) {
+  const node = document.createElement("span");
+  node.textContent = String(value);
+  return node.innerHTML;
+}
+
+resizeCanvas();
+draw();

@@ -1,0 +1,83 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { RoomManager } from "../src/room-manager.js";
+
+function createIo() {
+  const events = [];
+  return {
+    events,
+    to(target) {
+      return {
+        emit(event, payload) {
+          events.push({ target, event, payload });
+        },
+      };
+    },
+    emit(event, payload) {
+      events.push({ target: "all", event, payload });
+    },
+  };
+}
+
+function createSocket(id) {
+  return {
+    id,
+    data: {},
+    joined: new Set(),
+    join(code) {
+      this.joined.add(code);
+    },
+    leave(code) {
+      this.joined.delete(code);
+    },
+  };
+}
+
+test("创建房间时清理输入并设置房主", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  const room = manager.createRoom(host, {
+    playerName: "  测试   房主  ",
+    classId: "medic",
+    roomName: "测试房",
+    mode: "pve",
+    maxPlayers: 4,
+  });
+
+  assert.equal(room.hostId, "host");
+  assert.equal(room.players.get("host").name, "测试 房主");
+  assert.equal(room.players.get("host").className, "医师");
+  assert.equal(room.players.get("host").ready, true);
+  assert.equal(room.mode, "pve");
+  assert.equal(room.code.length, 5);
+});
+
+test("加入、准备及房主转移", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  const guest = createSocket("guest");
+  const room = manager.createRoom(host, { playerName: "房主" });
+
+  manager.joinRoom(guest, { code: room.code.toLowerCase(), playerName: "队友" });
+  manager.toggleReady(guest, true);
+  assert.equal(room.players.get("guest").ready, true);
+
+  manager.leaveRoom(host);
+  assert.equal(room.hostId, "guest");
+  assert.equal(room.players.get("guest").ready, true);
+});
+
+test("PvP 不允许单人开局", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  manager.createRoom(host, { playerName: "独行者", mode: "pvp" });
+  assert.throws(() => manager.startGame(host), /至少需要 2 名玩家/);
+});
+
+test("大厅中的键盘输入不会导致服务端异常", () => {
+  const manager = new RoomManager(createIo());
+  const visitor = createSocket("visitor");
+  assert.doesNotThrow(() => manager.handleInput(visitor, { right: true }));
+  assert.doesNotThrow(() => manager.chooseUpgrade(visitor, "power"));
+  assert.doesNotThrow(() => manager.buyShopItem(visitor, "heal"));
+});
