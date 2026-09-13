@@ -228,7 +228,13 @@ socket.on("upgrade:choices", (choices) => {
   elements.upgradeModal.classList.remove("hidden");
 });
 socket.on("upgrade:applied", () => elements.upgradeModal.classList.add("hidden"));
-socket.on("shop:bought", () => {
+socket.on("shop:bought", ({ gold }) => {
+  // 立即用服务端返回的最新金币刷新本地状态，避免等下一帧快照
+  const self = state.snapshot?.players.find((player) => player.id === socket.id);
+  if (self && typeof gold === "number") {
+    self.gold = gold;
+    elements.statsGold.textContent = gold;
+  }
   showToast("购买成功");
   renderShopModal();
 });
