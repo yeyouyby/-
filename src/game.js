@@ -220,6 +220,10 @@ export class GameSession {
         projectile.hitTargets = projectile.hitTargets.map((id) => (id === oldId ? newId : id));
       }
     }
+    // 对局结束后的结算名单（winnerIds）同步迁移，保证重发的 game:end 指向新身份
+    if (this.result && Array.isArray(this.result.winnerIds)) {
+      this.result.winnerIds = this.result.winnerIds.map((id) => (id === oldId ? newId : id));
+    }
     return true;
   }
 

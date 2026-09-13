@@ -218,6 +218,26 @@ test("重连会重映射飞行中弹丸的归属", () => {
   assert.deepEqual(projectile.hitTargets, ["player-0-new", "player-1"]);
 });
 
+test("结束后重连会迁移结算名单中的获胜者 ID", () => {
+  const { game, emitted } = createGame("pvp", 2);
+  game.elapsed = 3;
+  game.players.get("player-1").alive = false;
+  game.players.get("player-1").hp = 0;
+  game.checkEndConditions();
+  assert.equal(game.ended, true);
+  assert.deepEqual(game.result.winnerIds, ["player-0"]);
+
+  game.markDisconnected("player-0");
+  assert.equal(game.reconnectPlayer("player-0", "player-0-new"), true);
+  assert.deepEqual(game.result.winnerIds, ["player-0-new"]);
+
+  // 重发的 game:end 应携带新身份
+  game.resendState("player-0-new");
+  const resentEnd = emitted.find((item) => item.target === "player-0-new" && item.event === "game:end");
+  assert.ok(resentEnd);
+  assert.deepEqual(resentEnd.payload.winnerIds, ["player-0-new"]);
+});
+
 test("断线玩家不会拦截 PvP 弹丸", () => {
   const { game } = createGame("pvp", 2);
   const shooter = game.players.get("player-0");
