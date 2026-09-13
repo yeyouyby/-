@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#111827" />
+    <title>荒原小队 · 局域网乱斗</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="app">
+      <section id="lobby-screen" class="screen lobby-screen">
+        <div class="brand">
+          <p class="eyebrow">LAN CO-OP SURVIVOR</p>
+          <h1>荒原小队</h1>
+          <p>一台电脑开服，同一局域网的浏览器直接加入。</p>
+        </div>
+
+        <div class="lobby-grid">
+          <article class="panel create-panel">
+            <div class="panel-heading">
+              <span class="step">01</span>
+              <div>
+                <h2>建立据点</h2>
+                <p>创建一场新的战斗</p>
+              </div>
+            </div>
+            <label>
+              战士代号
+              <input id="player-name" maxlength="16" placeholder="输入昵称" autocomplete="nickname" />
+            </label>
+            <label>
+              职业
+              <select id="player-class">
+                <option value="assault">突击手 · 弹幕爆发</option>
+                <option value="guardian">守卫 · 能量护盾</option>
+                <option value="medic">医师 · 急救脉冲</option>
+                <option value="scout">游侠 · 闪避冲刺</option>
+              </select>
+            </label>
+            <label>
+              房间名称
+              <input id="room-name" maxlength="24" placeholder="今晚打怪" />
+            </label>
+            <div class="mode-picker">
+              <button class="mode-card active" data-mode="pve">
+                <strong>合作生存</strong>
+                <span>并肩抵抗 5 波怪物</span>
+              </button>
+              <button class="mode-card" data-mode="pvp">
+                <strong>竞技乱斗</strong>
+                <span>自动射击，最后一人获胜</span>
+              </button>
+            </div>
+            <label>
+              最大人数
+              <select id="max-players">
+                <option value="2">2 人</option>
+                <option value="4" selected>4 人</option>
+                <option value="6">6 人</option>
+                <option value="8">8 人</option>
+              </select>
+            </label>
+            <button id="create-room" class="primary">创建房间</button>
+          </article>
+
+          <article class="panel join-panel">
+            <div class="panel-heading">
+              <span class="step">02</span>
+              <div>
+                <h2>加入战斗</h2>
+                <p>输入邀请码或选择公开房间</p>
+              </div>
+            </div>
+            <div class="code-row">
+              <input id="room-code" maxlength="5" placeholder="房间码" autocapitalize="characters" />
+              <button id="join-room" class="secondary">加入</button>
+            </div>
+            <div class="room-list-heading">
+              <span>可加入房间</span>
+              <span id="connection-status" class="status-dot">连接中</span>
+            </div>
+            <div id="room-list" class="room-list">
+              <div class="empty-state">正在侦察附近房间…</div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="room-screen" class="screen hidden">
+        <div class="room-shell">
+          <header class="room-header">
+            <div>
+              <p class="eyebrow">集结区域</p>
+              <h1 id="current-room-name">房间</h1>
+            </div>
+            <div class="room-code-box">
+              <span>房间码</span>
+              <strong id="current-room-code">-----</strong>
+            </div>
+          </header>
+          <div class="room-content">
+            <article class="panel roster-panel">
+              <div class="roster-title">
+                <h2>小队成员</h2>
+                <span id="room-capacity">0 / 4</span>
+              </div>
+              <div id="player-list" class="player-list"></div>
+            </article>
+            <aside class="panel mission-panel">
+              <span id="room-mode-badge" class="badge">合作生存</span>
+              <h2 id="mission-title">坚守五个波次</h2>
+              <p id="mission-description">自动锁定怪物射击，拾取能量升级，倒下后等待队友救援。</p>
+              <div class="controls-card">
+                <span>操作</span>
+                <strong>A / D</strong> 移动
+                <strong>W / 空格</strong> 跳跃 / 二段跳
+                <strong>E</strong> 主动技能
+                <strong>Tab</strong> 商店
+                <strong>B</strong> 背包
+              </div>
+              <button id="ready-button" class="secondary">准备</button>
+              <button id="start-button" class="primary hidden">开始战斗</button>
+              <button id="leave-room" class="text-button">离开房间</button>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section id="game-screen" class="screen game-screen hidden">
+        <canvas id="game-canvas"></canvas>
+        <div class="game-hud">
+          <div class="hud-left">
+            <span id="wave-label">第 1 波</span>
+            <strong id="timer-label">02:30</strong>
+            <span id="phase-label" class="phase-label hidden"></span>
+          </div>
+          <div id="player-stats" class="player-stats">
+            <div class="stats-top">
+              <span id="stats-name">你</span>
+              <span id="stats-level">Lv.1</span>
+              <span class="gold"><i class="coin"></i><span id="stats-gold">0</span></span>
+            </div>
+            <div class="bar hp-bar"><div id="stats-hp-fill" class="bar-fill"></div></div>
+            <div class="bar xp-bar"><div id="stats-xp-fill" class="bar-fill"></div></div>
+          </div>
+          <div id="scoreboard" class="scoreboard"></div>
+          <div id="skill-panel" class="skill-panel">E 主动技能</div>
+          <div class="hud-actions">
+            <button id="open-shop" class="hud-btn">🛒 商店 <kbd>Tab</kbd></button>
+            <button id="open-backpack" class="hud-btn">🎒 背包 <kbd>B</kbd></button>
+          </div>
+          <div class="hud-help">A D 移动 · W / 空格 二段跳 · E 技能 · Tab 商店 · B 背包</div>
+        </div>
+        <div id="upgrade-modal" class="modal hidden">
+          <div class="modal-card">
+            <p class="eyebrow">LEVEL UP</p>
+            <h2>选择一项强化</h2>
+            <div id="upgrade-options" class="upgrade-options"></div>
+          </div>
+        </div>
+        <div id="shop-modal" class="modal hidden">
+          <div class="modal-card shop-card">
+            <button id="close-shop" class="modal-close" aria-label="关闭商店" title="关闭">×</button>
+            <p class="eyebrow">战地商店</p>
+            <h2>使用金币强化自己</h2>
+            <div id="shop-gold" class="shop-gold">0 金币</div>
+            <div class="shop-section-title">自我升级</div>
+            <div id="shop-services" class="shop-list"></div>
+            <div class="shop-section-title">补给 · 武器 / 道具</div>
+            <div id="shop-stock" class="shop-list"></div>
+          </div>
+        </div>
+        <div id="backpack-modal" class="modal hidden">
+          <div class="modal-card backpack-card">
+            <button id="close-backpack" class="modal-close" aria-label="关闭背包" title="关闭">×</button>
+            <p class="eyebrow">背包</p>
+            <h2>装备与道具</h2>
+            <div id="backpack-content" class="backpack-content"></div>
+          </div>
+        </div>
+        <div id="result-modal" class="modal hidden">
+          <div class="modal-card result-card">
+            <p class="eyebrow">MISSION COMPLETE</p>
+            <h2 id="result-title">战斗结束</h2>
+            <button id="return-room" class="primary">返回房间</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="/client.js"></script>
+  </body>
+</html>
