@@ -107,6 +107,20 @@ test("room:state 广播不泄露 playerKey", () => {
   }
 });
 
+test("单人房主断线重连后仍是房主", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  const room = manager.createRoom(host, { playerName: "房主" });
+  const playerKey = room.players.get("host").playerKey;
+
+  manager.handleDisconnect(host);
+  assert.equal(room.hostId, "host"); // 无后继者，保留原 hostId
+
+  const host2 = createSocket("host2");
+  manager.rejoin(host2, { code: room.code, playerKey });
+  assert.equal(room.hostId, "host2");
+});
+
 test("已在房间中的 socket 无法重连", () => {
   const manager = new RoomManager(createIo());
   const host = createSocket("host");

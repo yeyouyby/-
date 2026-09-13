@@ -202,6 +202,43 @@ test("重连会迁移玩家席位", () => {
   assert.equal(migrated.disconnected, false);
 });
 
+test("重连会重映射飞行中弹丸的归属", () => {
+  const { game } = createGame("pvp", 2);
+  game.projectiles.set("proj1", {
+    id: "proj1",
+    ownerId: "player-0",
+    hitTargets: ["player-0", "player-1"],
+    x: 0, y: 0, vx: 0, vy: 0, radius: 6, damage: 10, pierce: 0, life: 1, aoe: 0,
+  });
+  game.markDisconnected("player-0");
+  game.reconnectPlayer("player-0", "player-0-new");
+
+  const projectile = game.projectiles.get("proj1");
+  assert.equal(projectile.ownerId, "player-0-new");
+  assert.deepEqual(projectile.hitTargets, ["player-0-new", "player-1"]);
+});
+
+test("断线玩家不会拦截 PvP 弹丸", () => {
+  const { game } = createGame("pvp", 2);
+  const shooter = game.players.get("player-0");
+  const disconnected = game.players.get("player-1");
+  game.markDisconnected("player-1");
+
+  const projectile = {
+    id: "p",
+    ownerId: shooter.id,
+    hitTargets: [],
+    x: disconnected.x,
+    y: disconnected.y,
+    radius: 6,
+    damage: 10,
+    pierce: 0,
+  };
+  // 弹丸与断线玩家重叠，应跳过而非命中消耗
+  assert.equal(game.hitOpponent(projectile), false);
+  assert.equal(projectile.hitTargets.length, 0);
+});
+
 test("商店会消耗金币并应用强化", () => {
   const { game } = createGame();
   const player = game.players.get("player-0");

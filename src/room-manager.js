@@ -171,12 +171,18 @@ export class RoomManager {
     socket.data.classId = player.classId;
     socket.join(code);
 
-    if (room.game && !room.game.ended) {
+    if (room.hostId === oldId) room.hostId = socket.id;
+
+    if (room.game) {
       room.game.reconnectPlayer(oldId, socket.id);
+      this.sendSession(socket, room);
+      this.broadcastRoom(room);
+      // 无论对局是否结束都重发状态；结束时附带 game:end 以便客户端显示结算界面
+      room.game.resendState(socket.id);
+      return room;
     }
     this.sendSession(socket, room);
     this.broadcastRoom(room);
-    if (room.game && !room.game.ended) room.game.resendState(socket.id);
     return room;
   }
 

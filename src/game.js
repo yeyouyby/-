@@ -213,6 +213,13 @@ export class GameSession {
     player.id = newId;
     player.disconnected = false;
     this.players.set(newId, player);
+    // 重映射飞行中的弹丸归属与已命中记录，避免重连后误伤自己或击杀归属失效
+    for (const projectile of this.projectiles.values()) {
+      if (projectile.ownerId === oldId) projectile.ownerId = newId;
+      if (Array.isArray(projectile.hitTargets)) {
+        projectile.hitTargets = projectile.hitTargets.map((id) => (id === oldId ? newId : id));
+      }
+    }
     return true;
   }
 
@@ -220,6 +227,9 @@ export class GameSession {
     this.io.to(playerId).emit("game:start", { mode: this.room.mode, map: this.map });
     this.io.to(playerId).emit("shop:stock", this.shopStockPayload());
     this.io.to(playerId).emit("game:snapshot", this.snapshot());
+    if (this.ended && this.result) {
+      this.io.to(playerId).emit("game:end", this.result);
+    }
   }
 
   setInput(playerId, rawInput = {}) {
@@ -575,7 +585,8 @@ export class GameSession {
       enemy.grounded = true;
     }
 
-    if (enemy.bobHeight > 0 && enemy.grounded) {
+    // 浮动效果仅在站立于地面时生效，避免把平台上的 Boss 顶出平台导致下坠
+    if (enemy.bobHeight > 0 && enemy.grounded && landingY >= GROUND_Y) {
       enemy.y += Math.sin(this.elapsed * enemy.bobSpeed) * enemy.bobHeight;
     }
 
@@ -840,6 +851,7 @@ export class GameSession {
   hitOpponent(projectile) {
     if (!Array.isArray(projectile.hitTargets)) projectile.hitTargets = [];
     for (const player of this.livingPlayers()) {
+      if (player.disconnected) continue;
       if (player.id === projectile.ownerId || player.invulnerableFor > 0) continue;
       if (projectile.hitTargets.includes(player.id)) continue;
       const hitRadius = PLAYER_RADIUS + projectile.radius;
