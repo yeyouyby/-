@@ -126,6 +126,29 @@ test("断线玩家在游戏中不会被伤害或瞄准", () => {
   assert.equal(game.closestLivingPlayer({ x: player.x, y: player.y }), null);
 });
 
+test("断线玩家不会自动攻击", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  player.weapons[0].cooldown = 0;
+  game.enemies.set("e1", { id: "e1", x: player.x + 40, y: player.y, radius: 22, hp: 100, maxHp: 100, elite: false });
+  game.markDisconnected(player.id);
+
+  game.updatePlayers(1 / 30);
+  assert.equal(game.projectiles.size, 0);
+});
+
+test("断线玩家不会拾取掉落物", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  player.pickupRange = 500;
+  game.pickups.set("xp1", { id: "xp1", type: "xp", x: player.x + 10, y: player.y, value: 7, life: 20 });
+  game.markDisconnected(player.id);
+
+  game.updatePickups(1 / 30);
+  assert.equal(game.pickups.has("xp1"), true);
+  assert.equal(player.xp, 0);
+});
+
 test("断线玩家不会阻止 PvP 决出胜负", () => {
   const { game } = createGame("pvp", 2);
   game.elapsed = 3;

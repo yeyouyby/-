@@ -370,6 +370,7 @@ export class GameSession {
 
   updatePlayers(dt) {
     for (const player of this.players.values()) {
+      if (player.disconnected) continue;
       if (!player.alive) {
         if (this.room.mode === "pve" && this.livingPlayers().length > 0) {
           player.downFor -= dt;
@@ -615,7 +616,7 @@ export class GameSession {
   }
 
   spawnEnemy(kind = "grunt") {
-    const livingPlayers = this.livingPlayers();
+    const livingPlayers = this.connectedLivingPlayers();
     if (livingPlayers.length === 0) return;
     const anchor = livingPlayers[Math.floor(Math.random() * livingPlayers.length)];
     const side = Math.random() < 0.5 ? -1 : 1;
@@ -703,7 +704,7 @@ export class GameSession {
     for (const enemy of this.enemies.values()) {
       enemy.orbitHitCooldown = Math.max(0, enemy.orbitHitCooldown - dt);
     }
-    for (const player of this.livingPlayers()) {
+    for (const player of this.connectedLivingPlayers()) {
       const orbitWeapons = player.weapons.filter((weapon) => {
         const config = getWeapon(weapon.id);
         return config && config.kind === "orbit";
@@ -906,7 +907,7 @@ export class GameSession {
       }
       let collector = null;
       let closestDistance = Number.POSITIVE_INFINITY;
-      for (const player of this.livingPlayers()) {
+      for (const player of this.connectedLivingPlayers()) {
         const pickupDistance = distanceSquared(pickup, player);
         if (pickupDistance < player.pickupRange ** 2 && pickupDistance < closestDistance) {
           collector = player;

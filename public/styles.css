@@ -609,6 +609,7 @@ select:focus {
 }
 
 .modal-card {
+  position: relative;
   width: min(620px, 100%);
   padding: 30px;
   border: 1px solid var(--line);
@@ -620,6 +621,31 @@ select:focus {
 
 .modal-card h2 {
   font-size: 30px;
+}
+
+.modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 1;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 150ms, border-color 150ms, background 150ms;
+}
+
+.modal-close:hover {
+  color: var(--ink);
+  border-color: var(--orange);
+  background: rgba(255, 138, 54, 0.12);
 }
 
 .upgrade-options {
