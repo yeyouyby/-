@@ -30,6 +30,9 @@ function createSocket(id) {
     leave(code) {
       this.joined.delete(code);
     },
+    emit(event, payload) {
+      // 测试用：记录私有事件（如 room:session）
+    },
   };
 }
 
@@ -92,6 +95,30 @@ test("断线玩家保留席位，重连后迁移", () => {
   assert.equal(room.players.has("guest"), false);
   assert.equal(room.players.get("guest2").disconnected, false);
   assert.equal(guest2.joined.has(room.code), true);
+});
+
+test("room:state 广播不泄露 playerKey", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  manager.createRoom(host, { playerName: "房主" });
+  const serialized = manager.serializeRoom(manager.rooms.values().next().value);
+  for (const player of serialized.players) {
+    assert.equal("playerKey" in player, false);
+  }
+});
+
+test("已在房间中的 socket 无法重连", () => {
+  const manager = new RoomManager(createIo());
+  const host = createSocket("host");
+  const room = manager.createRoom(host, { playerName: "房主" });
+  const guest = createSocket("guest");
+  manager.joinRoom(guest, { code: room.code, playerName: "队友" });
+  const playerKey = room.players.get("guest").playerKey;
+  manager.handleDisconnect(guest);
+
+  const intruder = createSocket("intruder");
+  manager.createRoom(intruder, { playerName: "入侵者" });
+  assert.throws(() => manager.rejoin(intruder, { code: room.code, playerKey }), /已在房间中/);
 });
 
 test("无效 playerKey 无法重连", () => {

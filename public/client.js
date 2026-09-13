@@ -142,7 +142,12 @@ socket.on("connect", () => {
   elements.connection.textContent = "已连接";
   elements.connection.classList.add("online");
   // 断线后自动尝试恢复房间席位
-  const saved = JSON.parse(localStorage.getItem("lanBattleSession") || "null");
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem("lanBattleSession") || "null");
+  } catch {
+    localStorage.removeItem("lanBattleSession");
+  }
   if (saved?.code && saved?.playerKey) {
     socket.emit("room:rejoin", saved, (response) => {
       if (response?.ok && response.room) {
@@ -155,6 +160,10 @@ socket.on("connect", () => {
       }
     });
   }
+});
+
+socket.on("room:session", ({ code, playerKey }) => {
+  localStorage.setItem("lanBattleSession", JSON.stringify({ code, playerKey }));
 });
 
 socket.on("disconnect", () => {
@@ -347,9 +356,6 @@ function renderRoom(room) {
   }
 
   const self = room.players.find((player) => player.id === socket.id);
-  if (self && !self.disconnected && self.playerKey) {
-    localStorage.setItem("lanBattleSession", JSON.stringify({ code: room.code, playerKey: self.playerKey }));
-  }
   const isHost = room.hostId === socket.id;
   elements.readyButton.classList.toggle("hidden", isHost);
   elements.readyButton.textContent = self?.ready ? "取消准备" : "准备";

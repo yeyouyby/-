@@ -126,6 +126,26 @@ test("断线玩家在游戏中不会被伤害或瞄准", () => {
   assert.equal(game.closestLivingPlayer({ x: player.x, y: player.y }), null);
 });
 
+test("断线玩家不会阻止 PvP 决出胜负", () => {
+  const { game } = createGame("pvp", 2);
+  game.elapsed = 3;
+  game.markDisconnected("player-1");
+  game.checkEndConditions();
+
+  assert.equal(game.ended, true);
+  assert.deepEqual(game.result.winnerIds, ["player-0"]);
+});
+
+test("断线玩家不会阻止 PvE 失败判定", () => {
+  const { game } = createGame("pve", 2);
+  game.players.get("player-0").alive = false;
+  game.players.get("player-0").hp = 0;
+  game.markDisconnected("player-1"); // 仍存活但断线
+  game.checkEndConditions();
+
+  assert.equal(game.ended, true);
+});
+
 test("重连会迁移玩家席位", () => {
   const { game } = createGame();
   const player = game.players.get("player-0");

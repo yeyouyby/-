@@ -73,8 +73,15 @@ export class RoomManager {
     room.players.set(socket.id, player);
     socket.data.roomCode = room.code;
     socket.join(room.code);
+    this.sendSession(socket, room);
     this.broadcastRoom(room);
     return player;
+  }
+
+  sendSession(socket, room) {
+    const player = room.players.get(socket.id);
+    if (!player) return;
+    socket.emit("room:session", { code: room.code, playerKey: player.playerKey });
   }
 
   leaveRoom(socket) {
@@ -146,6 +153,7 @@ export class RoomManager {
   }
 
   rejoin(socket, payload = {}) {
+    if (socket.data.roomCode) throw new Error("当前已在房间中");
     const code = String(payload.code ?? "").trim().toUpperCase();
     const playerKey = String(payload.playerKey ?? "").trim();
     const room = this.rooms.get(code);
@@ -166,6 +174,7 @@ export class RoomManager {
     if (room.game && !room.game.ended) {
       room.game.reconnectPlayer(oldId, socket.id);
     }
+    this.sendSession(socket, room);
     this.broadcastRoom(room);
     if (room.game && !room.game.ended) room.game.resendState(socket.id);
     return room;
@@ -239,7 +248,6 @@ export class RoomManager {
         className: player.className,
         ready: player.ready,
         color: player.color,
-        playerKey: player.playerKey,
         disconnected: player.disconnected,
       })),
     };

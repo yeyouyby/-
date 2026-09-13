@@ -516,7 +516,7 @@ export class GameSession {
       }
       if (this.phaseTimer <= 0) {
         if (this.wave >= MAX_WAVES) {
-          this.finish({ title: "合作胜利，所有波次已清除", winnerIds: this.livingPlayers().map((player) => player.id) });
+          this.finish({ title: "合作胜利，所有波次已清除", winnerIds: this.connectedLivingPlayers().map((player) => player.id) });
           return;
         }
         this.enterPeace();
@@ -1015,6 +1015,10 @@ export class GameSession {
     return [...this.players.values()].filter((player) => player.alive);
   }
 
+  connectedLivingPlayers() {
+    return this.livingPlayers().filter((player) => !player.disconnected);
+  }
+
   closestLivingPlayer(point) {
     let closest = null;
     let closestDistance = Number.POSITIVE_INFINITY;
@@ -1031,7 +1035,7 @@ export class GameSession {
 
   checkEndConditions() {
     if (this.ended) return;
-    const living = this.livingPlayers();
+    const living = this.connectedLivingPlayers();
     if (this.players.size === 0) {
       this.finish({ title: "房间已关闭", winnerIds: [] });
       return;
@@ -1043,8 +1047,13 @@ export class GameSession {
           winnerIds: living.map((player) => player.id),
         });
       } else if (this.elapsed >= GAME_DURATION) {
-        const highest = [...this.players.values()].sort((a, b) => b.kills - a.kills || b.hp - a.hp)[0];
-        this.finish({ title: `${highest.name} 获胜`, winnerIds: [highest.id] });
+        const candidates = [...this.players.values()].filter((player) => !player.disconnected);
+        if (candidates.length === 0) {
+          this.finish({ title: "无人幸存", winnerIds: [] });
+        } else {
+          const highest = candidates.sort((a, b) => b.kills - a.kills || b.hp - a.hp)[0];
+          this.finish({ title: `${highest.name} 获胜`, winnerIds: [highest.id] });
+        }
       }
       return;
     }
