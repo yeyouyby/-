@@ -136,6 +136,28 @@ test("断线玩家不会阻止 PvP 决出胜负", () => {
   assert.deepEqual(game.result.winnerIds, ["player-0"]);
 });
 
+test("敌人会跳上平台追击高处的玩家", () => {
+  const { game } = createGame();
+  const player = game.players.get("player-0");
+  // 把玩家放到一个高台上
+  player.y = game.map.platforms[0].y - PLAYER_RADIUS;
+  player.x = game.map.platforms[0].x + game.map.platforms[0].width / 2;
+  player.grounded = true;
+
+  // 在玩家正下方生成一只普通怪
+  game.spawnEnemy("grunt");
+  const enemy = [...game.enemies.values()][0];
+  enemy.x = player.x;
+  enemy.y = GROUND_Y - enemy.radius;
+  enemy.grounded = true;
+
+  const startY = enemy.y;
+  // 连续推进几帧，敌人应因目标在上方而起跳
+  for (let i = 0; i < 5; i += 1) game.updateEnemy(enemy, 1 / 30);
+  assert.ok(enemy.vy < 0 || enemy.y < startY, "敌人应向高处起跳");
+  assert.equal(enemy.grounded, false);
+});
+
 test("断线玩家不会阻止 PvE 失败判定", () => {
   const { game } = createGame("pve", 2);
   game.players.get("player-0").alive = false;

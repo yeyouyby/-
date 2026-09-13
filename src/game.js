@@ -528,18 +528,61 @@ export class GameSession {
     }
 
     for (const enemy of this.enemies.values()) {
-      const target = this.closestLivingPlayer(enemy);
-      if (!target) continue;
-      const direction = Math.sign(target.x - enemy.x);
-      enemy.vx = direction * enemy.speed;
-      enemy.x = clamp(enemy.x + enemy.vx * dt, enemy.radius, MAP_WIDTH - enemy.radius);
-      enemy.y = GROUND_Y - enemy.radius + Math.sin(this.elapsed * enemy.bobSpeed) * enemy.bobHeight;
-      enemy.attackCooldown -= dt;
-      const hitRange = enemy.radius + PLAYER_RADIUS + 8;
-      if (distanceSquared(enemy, target) <= hitRange * hitRange && enemy.attackCooldown <= 0) {
-        this.damagePlayer(target, enemy.damage);
-        enemy.attackCooldown = 0.75;
+      this.updateEnemy(enemy, dt);
+    }
+  }
+
+  updateEnemy(enemy, dt) {
+    const target = this.closestLivingPlayer(enemy);
+    if (!target) return;
+    const direction = Math.sign(target.x - enemy.x);
+    enemy.vx = direction * enemy.speed;
+
+    // —— 追击跳跃：目标在更高处且水平接近时起跳，支持二段跳 ——
+    enemy.jumpCooldown = Math.max(0, enemy.jumpCooldown - dt);
+    const targetAbove = enemy.y - target.y;
+    const nearX = Math.abs(target.x - enemy.x) < 560;
+    if (enemy.grounded) {
+      enemy.jumps = 0;
+      if (targetAbove > enemy.radius + 26 && nearX && enemy.jumpCooldown <= 0) {
+        enemy.vy = -enemy.jumpSpeed;
+        enemy.grounded = false;
+        enemy.jumps += 1;
+        enemy.jumpCooldown = 0.9;
       }
+    } else if (targetAbove > enemy.radius && nearX && enemy.jumps < enemy.maxJumps && enemy.jumpCooldown <= 0) {
+      enemy.vy = -enemy.jumpSpeed * 0.92;
+      enemy.jumps += 1;
+      enemy.jumpCooldown = 0.5;
+    }
+
+    const previousBottom = enemy.y + enemy.radius;
+    enemy.vy += GRAVITY * dt;
+    enemy.x = clamp(enemy.x + enemy.vx * dt, enemy.radius, MAP_WIDTH - enemy.radius);
+    enemy.y += enemy.vy * dt;
+    enemy.grounded = false;
+
+    let landingY = GROUND_Y;
+    for (const platform of this.map.platforms) {
+      const withinX = enemy.x + enemy.radius > platform.x && enemy.x - enemy.radius < platform.x + platform.width;
+      const crossedTop = previousBottom <= platform.y && enemy.y + enemy.radius >= platform.y;
+      if (withinX && crossedTop && enemy.vy >= 0) landingY = Math.min(landingY, platform.y);
+    }
+    if (enemy.y + enemy.radius >= landingY) {
+      enemy.y = landingY - enemy.radius;
+      enemy.vy = 0;
+      enemy.grounded = true;
+    }
+
+    if (enemy.bobHeight > 0 && enemy.grounded) {
+      enemy.y += Math.sin(this.elapsed * enemy.bobSpeed) * enemy.bobHeight;
+    }
+
+    enemy.attackCooldown -= dt;
+    const hitRange = enemy.radius + PLAYER_RADIUS + 8;
+    if (distanceSquared(enemy, target) <= hitRange * hitRange && enemy.attackCooldown <= 0) {
+      this.damagePlayer(target, enemy.damage);
+      enemy.attackCooldown = 0.75;
     }
   }
 
@@ -586,6 +629,12 @@ export class GameSession {
       x,
       y: GROUND_Y - radius,
       vx: 0,
+      vy: 0,
+      grounded: true,
+      jumps: 0,
+      maxJumps: boss ? 1 : 2,
+      jumpCooldown: 0,
+      jumpSpeed: boss ? 600 : 800,
       radius,
       hp,
       maxHp: hp,
