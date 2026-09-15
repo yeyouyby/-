@@ -275,8 +275,18 @@ test("【回归】真实 tick 循环下无尽模式会刷怪、推进波次并�
   assert.ok(game.enemies.size > 0, "无尽模式必须在真实 tick 循环中刷怪");
 
   // 玩家自动锁定的目标必须是怪物，而不是队友
-  const target = game.findTarget(game.players.get("player-0"));
-  assert.ok(target && game.enemies.has(target.id), "无尽模式的自动锁定目标是怪物");
+  // （怪物在 650-1050px 外刷新，而锁定射程是 780px，这里把一只怪拉到身边再断言）
+  const shooter = game.players.get("player-0");
+  const teammate = game.players.get("player-1");
+  game.enemies.clear(); // 只留一只怪，确保断言与其它刷新的怪无关
+  const nearEnemy = game.spawnEnemy();
+  nearEnemy.x = shooter.x + 120;
+  nearEnemy.y = shooter.y;
+  teammate.x = shooter.x + 130;
+  teammate.y = shooter.y;
+  const target = game.findTarget(shooter);
+  assert.ok(target, "射程内有目标时应能锁定");
+  assert.equal(target.id, nearEnemy.id, "无尽模式的自动锁定目标是怪物而不是队友");
 
   // 推进到波次结束后应进入和平时间并触发自动存档回调
   game.phaseTimer = 0.01;
