@@ -30,6 +30,11 @@ export function sanitizeName(name) {
   return normalized.slice(0, 16) || "无名战士";
 }
 
+/** socket.io 中每个账号一个房间名，用于向同一账号的所有连接推送数据（如存档列表） */
+export function accountChannel(accountId) {
+  return `account:${accountId}`;
+}
+
 export function sample(array, count) {
   const source = [...array];
   const selected = [];

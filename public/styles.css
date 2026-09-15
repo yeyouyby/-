@@ -904,6 +904,243 @@ select:focus {
   font-size: 12px;
 }
 
+/* ---------------------------------------------------- 账号 / 存档 / 备份 */
+
+.account-panel {
+  grid-column: 1 / -1;
+}
+
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.account-actions .primary {
+  width: auto;
+  flex: 1 1 180px;
+}
+
+.account-actions .secondary {
+  flex: 1 1 180px;
+}
+
+.hint {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.profile-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.profile-head small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.profile-head .avatar {
+  background: linear-gradient(135deg, #ffab61, var(--orange));
+}
+
+.profile-head .text-button {
+  width: auto;
+  margin-left: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.profile-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.profile-stat {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0e1621;
+}
+
+.profile-stat span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.profile-stat strong {
+  font-size: 16px;
+}
+
+.save-points-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 18px 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.save-points-head .text-button {
+  width: auto;
+  padding: 6px 10px;
+}
+
+.save-list {
+  display: grid;
+  gap: 8px;
+  max-height: 268px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.save-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0e1621;
+}
+
+.save-row.active {
+  border-color: var(--orange);
+  background: rgba(255, 138, 54, 0.09);
+}
+
+.save-row.finished {
+  opacity: 0.62;
+}
+
+.save-row-main {
+  display: grid;
+  gap: 3px;
+}
+
+.save-row-main small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.save-row-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.save-row-actions .text-button {
+  width: auto;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.text-button.danger,
+.danger {
+  color: var(--danger);
+}
+
+.account-settings {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.account-settings[open] summary,
+.admin-panel[open] summary {
+  margin-bottom: 14px;
+  color: var(--ink);
+}
+
+.account-settings summary,
+.admin-panel summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.admin-panel {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.admin-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.admin-output {
+  max-height: 190px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: #9fd7c0;
+  background: #0a1017;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.file-field input {
+  padding: 10px;
+}
+
+.save-point-box {
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(10, 16, 23, 0.6);
+}
+
+.save-point-box .save-points-head {
+  margin-top: 0;
+}
+
+.save-point-current {
+  color: var(--cyan);
+}
+
+.save-point-box .save-list {
+  max-height: 200px;
+}
+
+.result-note {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.mode-picker {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
 .toast {
   position: fixed;
   bottom: 24px;
@@ -921,6 +1158,19 @@ select:focus {
   .lobby-grid,
   .room-content {
     grid-template-columns: 1fr;
+  }
+
+  .account-panel {
+    grid-column: auto;
+  }
+
+  .save-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .save-row-actions {
+    justify-content: flex-end;
   }
 
   .lobby-screen,

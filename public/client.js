@@ -9,6 +9,26 @@ const TIERS = [
   { name: "传说", color: "#ff8a36" },
 ];
 
+const MODE_LABELS = { pve: "合作生存", pvp: "竞技乱斗", endless: "无尽模式" };
+
+function modeLabel(mode) {
+  return MODE_LABELS[mode] ?? "合作生存";
+}
+
+function formatClock(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
 // 用 DOM API 构建节点（textContent），避免 innerHTML 注入
 function el(tag, options = {}, children = []) {
   const node = document.createElement(tag);
@@ -72,7 +92,43 @@ const elements = {
   upgradeOptions: $("#upgrade-options"),
   resultModal: $("#result-modal"),
   resultTitle: $("#result-title"),
+  resultNote: $("#result-note"),
   toast: $("#toast"),
+  // —— 账号与存档 ——
+  accountGuest: $("#account-guest"),
+  accountUser: $("#account-user"),
+  accountUsername: $("#account-username"),
+  accountPassword: $("#account-password"),
+  accountDisplay: $("#account-display"),
+  accountLogin: $("#account-login"),
+  accountRegister: $("#account-register"),
+  accountLogout: $("#account-logout"),
+  profileAvatar: $("#profile-avatar"),
+  profileName: $("#profile-name"),
+  profileUsername: $("#profile-username"),
+  profileStats: $("#profile-stats"),
+  saveList: $("#save-list"),
+  refreshSaves: $("#refresh-saves"),
+  passwordNew: $("#password-new"),
+  passwordCurrent: $("#password-current"),
+  changePassword: $("#account-change-password"),
+  deletePassword: $("#account-delete-password"),
+  deleteAccount: $("#account-delete"),
+  savePointBox: $("#save-point-box"),
+  savePointCurrent: $("#save-point-current"),
+  roomSaveList: $("#room-save-list"),
+  saveProgress: $("#save-progress"),
+  // —— 管理员备份 ——
+  adminKey: $("#admin-key"),
+  adminInfo: $("#admin-info"),
+  adminExport: $("#admin-export"),
+  adminSnapshot: $("#admin-snapshot"),
+  adminImportFile: $("#admin-import-file"),
+  adminImportReplace: $("#admin-import-replace"),
+  adminImportMerge: $("#admin-import-merge"),
+  adminBackupList: $("#admin-backup-list"),
+  adminRefreshBackups: $("#admin-refresh-backups"),
+  adminOutput: $("#admin-output"),
 };
 
 const context = elements.canvas.getContext("2d");
@@ -85,15 +141,26 @@ const state = {
   snapshot: null,
   keys: { left: false, right: false, jump: false, skill: false },
   toastTimer: null,
+  selectedSaveId: null,
+};
+
+// 账号：令牌与数据都存在服务端（明文），这里只保留登录令牌用于自动恢复
+const account = {
+  token: localStorage.getItem("lanBattleAccountToken") || null,
+  profile: null,
+  saves: [],
 };
 
 elements.name.value = localStorage.getItem("lanBattleName") || "";
+elements.adminKey.value = localStorage.getItem("lanBattleAdminKey") || "";
 
 document.querySelectorAll(".mode-card").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll(".mode-card").forEach((candidate) => candidate.classList.remove("active"));
     button.classList.add("active");
     state.selectedMode = button.dataset.mode;
+    if (state.selectedMode !== "endless") state.selectedSaveId = null;
+    renderAccountSaves();
   });
 });
 
@@ -106,6 +173,7 @@ $("#create-room").addEventListener("click", () => {
     roomName: elements.roomName.value,
     mode: state.selectedMode,
     maxPlayers: Number(elements.maxPlayers.value),
+    saveId: state.selectedMode === "endless" ? state.selectedSaveId : null,
   });
 });
 
@@ -133,6 +201,75 @@ $("#leave-room").addEventListener("click", () => {
 });
 $("#return-room").addEventListener("click", () => emitWithAck("game:replay"));
 
+// —— 账号操作 ——
+elements.accountLogin.addEventListener("click", () => {
+  const username = elements.accountUsername.value.trim();
+  const password = elements.accountPassword.value;
+  if (!username || !password) {
+    showToast("请输入账号名和密码");
+    return;
+  }
+  emitAccount("account:login", { username, password }, () => {
+    elements.accountPassword.value = "";
+  });
+});
+
+elements.accountRegister.addEventListener("click", () => {
+  const username = elements.accountUsername.value.trim();
+  const password = elements.accountPassword.value;
+  if (!username || !password) {
+    showToast("请输入账号名和密码");
+    return;
+  }
+  emitAccount("account:register", {
+    username,
+    password,
+    displayName: elements.accountDisplay.value.trim(),
+  }, () => {
+    elements.accountPassword.value = "";
+    elements.accountDisplay.value = "";
+  });
+});
+
+elements.accountLogout.addEventListener("click", () => emitAccount("account:logout"));
+elements.refreshSaves.addEventListener("click", () => emitAccount("account:saves"));
+elements.changePassword.addEventListener("click", () => {
+  emitAccount("account:password", {
+    currentPassword: elements.passwordCurrent.value,
+    newPassword: elements.passwordNew.value,
+  }, () => {
+    elements.passwordCurrent.value = "";
+    elements.passwordNew.value = "";
+    showToast("密码已修改");
+  });
+});
+elements.deleteAccount.addEventListener("click", () => {
+  const password = elements.deletePassword.value;
+  if (!password) {
+    showToast("请输入当前密码以注销账号");
+    return;
+  }
+  if (!window.confirm("注销账号会删除该账号及其全部存档，确定继续？")) return;
+  emitAccount("account:delete", { password }, () => {
+    elements.deletePassword.value = "";
+    showToast("账号已注销");
+  });
+});
+
+// —— 管理员备份操作 ——
+elements.adminInfo.addEventListener("click", refreshAdminInfo);
+elements.adminExport.addEventListener("click", exportBackupFile);
+elements.adminSnapshot.addEventListener("click", async () => {
+  const result = await adminRequest("/api/admin/backup", { method: "POST" });
+  if (!result) return;
+  adminLog(`已生成快照：${result.file}`);
+  renderAdminBackups(result.backups);
+});
+elements.adminRefreshBackups.addEventListener("click", refreshAdminBackups);
+elements.adminImportReplace.addEventListener("click", () => importBackupFile("replace"));
+elements.adminImportMerge.addEventListener("click", () => importBackupFile("merge"));
+elements.saveProgress.addEventListener("click", () => emitWithAck("save:now"));
+
 elements.openShop.addEventListener("click", () => toggleShop());
 elements.openBackpack.addEventListener("click", () => toggleBackpack());
 elements.closeShop.addEventListener("click", () => elements.shopModal.classList.add("hidden"));
@@ -141,6 +278,18 @@ elements.closeBackpack.addEventListener("click", () => elements.backpackModal.cl
 socket.on("connect", () => {
   elements.connection.textContent = "已连接";
   elements.connection.classList.add("online");
+  // 用本地令牌恢复登录状态（服务器迁移后令牌依然有效）
+  if (account.token) {
+    socket.emit("account:auth", { token: account.token }, (response) => {
+      if (!response?.ok) {
+        account.token = null;
+        account.profile = null;
+        localStorage.removeItem("lanBattleAccountToken");
+        renderAccount();
+        renderAccountSaves();
+      }
+    });
+  }
   // 断线后自动尝试恢复房间席位
   let saved = null;
   try {
@@ -172,6 +321,40 @@ socket.on("disconnect", () => {
   showToast("与服务器的连接已断开");
 });
 
+socket.on("account:session", (payload = {}) => {
+  const hadAccount = Boolean(account.profile);
+  account.token = payload.token ?? null;
+  account.profile = payload.account ?? null;
+  account.saves = Array.isArray(payload.saves) ? payload.saves : [];
+  if (account.token) {
+    localStorage.setItem("lanBattleAccountToken", account.token);
+    if (account.profile) {
+      elements.name.value = account.profile.displayName;
+      localStorage.setItem("lanBattleName", account.profile.displayName);
+      if (payload.created) showToast("注册成功，已自动登录");
+      else if (payload.passwordChanged) showToast("密码已修改");
+      else if (!payload.resumed) showToast(`欢迎回来，${account.profile.displayName}`);
+      else showToast("已恢复登录状态");
+    }
+  } else {
+    localStorage.removeItem("lanBattleAccountToken");
+    if (hadAccount) showToast("已退出账号");
+  }
+  renderAccount();
+  renderAccountSaves();
+});
+socket.on("account:profile", ({ account: profile } = {}) => {
+  if (!profile) return;
+  account.profile = profile;
+  renderAccount();
+});
+socket.on("account:saves", (saves) => {
+  account.saves = Array.isArray(saves) ? saves : [];
+  renderAccountSaves();
+  renderRoomSavePoints();
+});
+socket.on("account:error", ({ message }) => showToast(message));
+socket.on("save:error", ({ message }) => showToast(message));
 socket.on("lobby:rooms", renderRoomList);
 socket.on("room:state", (room) => {
   state.room = room;
@@ -181,15 +364,20 @@ socket.on("room:state", (room) => {
     showScreen("room");
   }
 });
-socket.on("game:start", ({ map, mode }) => {
+socket.on("game:start", ({ map, mode, resumed, wave }) => {
   state.map = map;
   state.snapshot = null;
   elements.upgradeModal.classList.add("hidden");
   elements.shopModal.classList.add("hidden");
   elements.backpackModal.classList.add("hidden");
   elements.resultModal.classList.add("hidden");
-  elements.waveLabel.textContent = mode === "pve" ? "第 1 波" : "竞技乱斗";
+  elements.waveLabel.textContent = mode === "endless"
+    ? `无尽 · 第 ${wave ?? 1} 波`
+    : mode === "pve" ? "第 1 波" : "竞技乱斗";
   elements.phaseLabel.classList.add("hidden");
+  const isHost = state.room?.hostId === socket.id;
+  elements.saveProgress.classList.toggle("hidden", !(mode === "endless" && isHost));
+  if (resumed) showToast(`已从存档点继续：第 ${wave ?? 1} 波`);
   showScreen("game");
   resizeCanvas();
 });
@@ -203,12 +391,15 @@ socket.on("shop:stock", ({ services, stock }) => {
   renderShopModal();
 });
 socket.on("game:event", (event) => {
-  if (event.type === "wave") showToast(`第 ${event.wave} 波来袭`);
+  if (event.type === "wave") showToast(event.endless ? `第 ${event.wave} 波来袭` : `第 ${event.wave} 波来袭`);
   if (event.type === "peace") showToast(`第 ${event.wave} 波已清除，和平时间，可打开商店（Tab）`);
   if (event.type === "skill") showToast(`${event.skillName} 已释放`);
   if (event.type === "chest") showToast(`宝箱获得 ${event.gold} 金币与装备`);
   if (event.type === "pickup") showToast(event.label);
   if (event.type === "bossDefeated") showToast("Boss 已被击败，宝箱已掉落");
+  if (event.type === "saved") showToast(`${event.reason === "manual" ? "已保存进度" : "已自动保存进度"}：${event.label}`);
+  if (event.type === "resumed") showToast(`已从存档点继续：${event.label ?? `第 ${event.wave} 波`}`);
+  if (event.type === "saveFailed") showToast(event.message);
 });
 socket.on("upgrade:choices", (choices) => {
   elements.upgradeOptions.replaceChildren();
@@ -241,9 +432,13 @@ socket.on("shop:bought", ({ gold }) => {
 socket.on("shop:error", ({ message }) => showToast(message));
 socket.on("game:end", (result) => {
   elements.resultTitle.textContent = result.title;
+  elements.resultNote.textContent = result.endless
+    ? `本次到达第 ${result.wave} 波。存档点已封存，重新开始会从第 1 波出发；也可以回到房间选择其它存档点。`
+    : "";
   elements.resultModal.classList.remove("hidden");
   elements.shopModal.classList.add("hidden");
   elements.backpackModal.classList.add("hidden");
+  elements.saveProgress.classList.add("hidden");
 });
 socket.on("server:error", ({ message }) => showToast(message));
 
@@ -281,6 +476,16 @@ function toggleBackpack() {
   if (!hidden) renderBackpack();
 }
 
+function emitAccount(event, payload, onSuccess) {
+  socket.emit(event, payload, (response) => {
+    if (!response?.ok) {
+      showToast(response?.error || "操作失败");
+      return;
+    }
+    if (typeof onSuccess === "function") onSuccess(response);
+  });
+}
+
 function joinRoom(code) {
   const playerName = getPlayerName();
   if (!playerName) return;
@@ -304,11 +509,11 @@ function emitWithAck(event, payload) {
       showToast(response?.error || "操作失败");
       return;
     }
-    if (response.room && event !== "game:start") {
-      state.room = response.room;
-      renderRoom(response.room);
-      showScreen("room");
-    }
+    if (!response.room) return;
+    state.room = response.room;
+    renderRoom(response.room);
+    // 只有进入房间的动作才切换界面；游戏内的操作（如手动存档）不应跳出战场
+    if (event === "room:create" || event === "room:join" || event === "room:rejoin") showScreen("room");
   });
 }
 
@@ -319,11 +524,12 @@ function renderRoomList(rooms) {
     return;
   }
   for (const room of rooms) {
+    const detail = `${modeLabel(room.mode)} · ${room.code}${room.saveLabel ? ` · 存档：${room.saveLabel}` : ""}`;
     elements.roomList.append(
       el("div", { className: "room-row" }, [
         el("div", {}, [
           el("strong", { text: room.name }),
-          el("small", { text: `${room.mode === "pve" ? "合作生存" : "竞技乱斗"} · ${room.code}` }),
+          el("small", { text: detail }),
         ]),
         el("span", { text: `${room.players}/${room.maxPlayers}` }),
         el("button", { text: "加入", attrs: { "data-code": room.code } }),
@@ -332,16 +538,307 @@ function renderRoomList(rooms) {
   }
 }
 
+/* ------------------------------------------------------------- 账号与存档 */
+
+function renderAccount() {
+  const profile = account.profile;
+  elements.accountGuest.classList.toggle("hidden", Boolean(profile));
+  elements.accountUser.classList.toggle("hidden", !profile);
+  if (!profile) return;
+  elements.profileName.textContent = profile.displayName;
+  elements.profileUsername.textContent = `@${profile.username}`;
+  elements.profileAvatar.textContent = profile.displayName.slice(0, 1);
+  const stats = profile.stats ?? {};
+  elements.profileStats.replaceChildren();
+  const entries = [
+    ["出战", `${stats.games ?? 0} 场`],
+    ["胜场", `${stats.wins ?? 0}`],
+    ["击杀", `${stats.kills ?? 0}`],
+    ["最高波次", `${stats.bestWave ?? 0}`],
+    ["无尽最高", `${stats.endlessBestWave ?? 0} 波`],
+    ["累计时长", formatClock(stats.playSeconds ?? 0)],
+  ];
+  for (const [label, value] of entries) {
+    elements.profileStats.append(
+      el("div", { className: "profile-stat" }, [
+        el("span", { text: label }),
+        el("strong", { text: value }),
+      ]),
+    );
+  }
+}
+
+function saveRow(save, { selectable = false, selected = false, onSelect = null } = {}) {
+  const finished = save.status === "finished";
+  const row = el("div", { className: `save-row${selected ? " active" : ""}${finished ? " finished" : ""}` }, [
+    el("div", { className: "save-row-main" }, [
+      el("strong", { text: save.label }),
+      el("small", {
+        text: `${finished ? "已结束" : "进行中"} · ${formatDateTime(save.updatedAt)} · ${save.players.length} 人`,
+      }),
+    ]),
+  ]);
+  const actions = el("div", { className: "save-row-actions" });
+  if (selectable && !finished) {
+    const select = el("button", { className: "text-button", text: selected ? "已选择" : "选择" });
+    select.addEventListener("click", () => onSelect?.(save));
+    actions.append(select);
+  }
+  const remove = el("button", { className: "text-button danger", text: "删除" });
+  remove.addEventListener("click", () => {
+    if (!window.confirm(`删除存档「${save.label}」？该操作不可恢复。`)) return;
+    emitAccount("account:delete-save", { saveId: save.id });
+  });
+  actions.append(remove);
+  row.append(actions);
+  return row;
+}
+
+function renderAccountSaves() {
+  elements.saveList.replaceChildren();
+  if (!account.profile) {
+    elements.saveList.append(el("div", { className: "empty-state", text: "登录后可以查看并管理无尽模式存档。" }));
+    return;
+  }
+  const saves = account.saves ?? [];
+  if (!saves.length) {
+    elements.saveList.append(el("div", { className: "empty-state", text: "暂无存档，进入无尽模式后会自动保存。" }));
+    return;
+  }
+  for (const save of saves) {
+    elements.saveList.append(
+      saveRow(save, {
+        selectable: true,
+        selected: state.selectedSaveId === save.id,
+        onSelect: (picked) => {
+          state.selectedSaveId = state.selectedSaveId === picked.id ? null : picked.id;
+          renderAccountSaves();
+          showToast(state.selectedSaveId ? `已选择存档点「${picked.label}」，创建无尽房间后将从这里继续` : "已取消选择存档点");
+        },
+      }),
+    );
+  }
+}
+
+function renderRoomSavePoints() {
+  const room = state.room;
+  const visible = Boolean(room && room.mode === "endless" && room.status === "waiting");
+  elements.savePointBox.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  elements.savePointCurrent.textContent = room.saveLabel ? `当前：${room.saveLabel}` : "当前：新开始";
+  elements.roomSaveList.replaceChildren();
+  const isHost = room.hostId === socket.id;
+  if (!isHost) {
+    elements.roomSaveList.append(
+      el("div", {
+        className: "empty-state",
+        text: room.saveLabel ? `房主选择的存档点：${room.saveLabel}` : "房主尚未选择存档点（从第 1 波开始）",
+      }),
+    );
+    return;
+  }
+  if (!account.profile) {
+    elements.roomSaveList.append(el("div", { className: "empty-state", text: "登录账号后可以选择存档点，并自动保存无尽进度。" }));
+    return;
+  }
+  const saves = (account.saves ?? []).filter((save) => save.status === "active");
+  const freshRow = el("div", { className: `save-row${room.saveId ? "" : " active"}` }, [
+    el("div", { className: "save-row-main" }, [
+      el("strong", { text: "新开始" }),
+      el("small", { text: "从第 1 波出发，清空波次后自动存档" }),
+    ]),
+    el("div", { className: "save-row-actions" }, [
+      (() => {
+        const button = el("button", { className: "text-button", text: "选择" });
+        button.addEventListener("click", () => emitWithAck("room:set-save", { saveId: null }));
+        return button;
+      })(),
+    ]),
+  ]);
+  elements.roomSaveList.append(freshRow);
+  if (!saves.length) {
+    elements.roomSaveList.append(el("div", { className: "empty-state", text: "还没有存档点，先玩一局无尽模式就会自动生成。" }));
+    return;
+  }
+  for (const save of saves) {
+    elements.roomSaveList.append(
+      saveRow(save, {
+        selectable: true,
+        selected: room.saveId === save.id,
+        onSelect: (picked) => emitWithAck("room:set-save", { saveId: picked.id }),
+      }),
+    );
+  }
+}
+
+/* --------------------------------------------------------------- 管理备份 */
+
+function adminLog(message) {
+  const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  elements.adminOutput.textContent = `[${stamp}] ${message}\n${elements.adminOutput.textContent}`.slice(0, 4000);
+}
+
+function adminKeyValue() {
+  const key = elements.adminKey.value.trim();
+  if (!key) {
+    showToast("请先填写管理密钥（服务端启动时终端会打印）");
+    return null;
+  }
+  localStorage.setItem("lanBattleAdminKey", key);
+  return key;
+}
+
+async function adminRequest(path, options = {}) {
+  const key = adminKeyValue();
+  if (!key) return null;
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers: { "x-admin-key": key, "Content-Type": "application/json", ...(options.headers ?? {}) },
+    });
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { ok: false, error: text.slice(0, 300) || `HTTP ${response.status}` };
+    }
+    if (!response.ok || payload?.ok === false) {
+      const message = payload?.error || `请求失败（HTTP ${response.status}）`;
+      showToast(message);
+      adminLog(`失败：${message}`);
+      return null;
+    }
+    return payload;
+  } catch (error) {
+    showToast(`请求失败：${error.message}`);
+    adminLog(`失败：${error.message}`);
+    return null;
+  }
+}
+
+async function refreshAdminInfo() {
+  const info = await adminRequest("/api/admin/info");
+  if (!info) return;
+  const data = info.data ?? {};
+  adminLog(
+    `数据目录：${data.directory}\n账号 ${data.accounts} · 存档 ${data.saves}（进行中 ${data.activeSaves}） · 登录令牌 ${data.sessions}\n房间 ${info.rooms} · 在线玩家 ${info.players}\n最近备份：${data.server?.lastBackupFile ?? "无"}`,
+  );
+  renderAdminBackups(null);
+  await refreshAdminBackups();
+}
+
+async function refreshAdminBackups() {
+  const result = await adminRequest("/api/admin/backups");
+  if (!result) return;
+  renderAdminBackups(result.backups);
+}
+
+function renderAdminBackups(backups) {
+  if (!backups) return;
+  elements.adminBackupList.replaceChildren();
+  if (!backups.length) {
+    elements.adminBackupList.append(el("div", { className: "empty-state", text: "暂无本地快照。" }));
+    return;
+  }
+  for (const backup of backups) {
+    const key = elements.adminKey.value.trim();
+    const row = el("div", { className: "save-row" }, [
+      el("div", { className: "save-row-main" }, [
+        el("strong", { text: backup.file }),
+        el("small", { text: `${formatDateTime(backup.createdAt)} · ${Math.max(1, Math.round(backup.size / 1024))} KB` }),
+      ]),
+    ]);
+    const actions = el("div", { className: "save-row-actions" });
+    const download = el("a", { className: "text-button", text: "下载", attrs: { href: `/api/admin/backups/${encodeURIComponent(backup.file)}?key=${encodeURIComponent(key)}`, download: backup.file } });
+    const restore = el("button", { className: "text-button danger", text: "还原" });
+    restore.addEventListener("click", async () => {
+      if (!window.confirm(`用快照 ${backup.file} 覆盖当前服务器数据？（会先自动备份当前数据）`)) return;
+      const result = await adminRequest("/api/admin/restore-backup", {
+        method: "POST",
+        body: JSON.stringify({ file: backup.file }),
+      });
+      if (result) {
+        adminLog(`已用快照还原：${result.fileName}`);
+        await refreshAdminInfo();
+      }
+    });
+    actions.append(download, restore);
+    row.append(actions);
+    elements.adminBackupList.append(row);
+  }
+}
+
+async function exportBackupFile() {
+  const key = adminKeyValue();
+  if (!key) return;
+  try {
+    const response = await fetch("/api/admin/export", { headers: { "x-admin-key": key } });
+    if (!response.ok) {
+      showToast(`导出失败（HTTP ${response.status}）`);
+      return;
+    }
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const match = /filename="([^"]+)"/.exec(disposition);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = match?.[1] ?? `lan-battle-backup-${Date.now()}.json`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    adminLog(`已导出备份 ${anchor.download}（明文，包含账号与存档，请妥善保管）`);
+  } catch (error) {
+    showToast(`导出失败：${error.message}`);
+  }
+}
+
+async function importBackupFile(mode) {
+  const file = elements.adminImportFile.files?.[0];
+  if (!file) {
+    showToast("请先选择备份文件");
+    return;
+  }
+  const label = mode === "merge" ? "合并导入" : "覆盖还原";
+  if (mode === "replace" && !window.confirm("覆盖还原会替换服务器上现有的账号与存档（会先自动备份当前数据），确定继续？")) return;
+  let payload = null;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (error) {
+    showToast(`备份文件不是有效的 JSON：${error.message}`);
+    return;
+  }
+  const result = await adminRequest(`/api/admin/import?mode=${mode}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (!result) return;
+  const report = result.report ?? {};
+  adminLog(
+    `${label}完成：账号 +${report.accounts?.added ?? 0}/~${report.accounts?.updated ?? 0}，存档 +${report.saves?.added ?? 0}/~${report.saves?.updated ?? 0}，令牌恢复 ${report.sessions?.imported ?? 0}；原数据快照 ${report.preImportBackup ?? "无"}`,
+  );
+  showToast(`${label}完成`);
+  elements.adminImportFile.value = "";
+  await refreshAdminBackups();
+}
+
 function renderRoom(room) {
   elements.currentRoomName.textContent = room.name;
   elements.currentRoomCode.textContent = room.code;
   elements.roomCapacity.textContent = `${room.players.length} / ${room.maxPlayers}`;
   const pve = room.mode === "pve";
-  elements.roomModeBadge.textContent = pve ? "合作生存" : "竞技乱斗";
-  elements.missionTitle.textContent = pve ? "坚守五个波次" : "成为最后的幸存者";
-  elements.missionDescription.textContent = pve
-    ? "自动锁定怪物射击，拾取能量升级，波次之间有和平时间可逛商店。"
-    : "武器自动锁定附近对手，利用平台和升级建立优势。";
+  const endless = room.mode === "endless";
+  elements.roomModeBadge.textContent = modeLabel(room.mode);
+  elements.missionTitle.textContent = endless
+    ? "无尽波次，挑战极限"
+    : pve ? "坚守五个波次" : "成为最后的幸存者";
+  elements.missionDescription.textContent = endless
+    ? "波次无限递进，每清空一波进入和平时间并联机存档；房主可在下方选择存档点继续之前的进度。"
+    : pve
+      ? "自动锁定怪物射击，拾取能量升级，波次之间有和平时间可逛商店。"
+      : "武器自动锁定附近对手，利用平台和升级建立优势。";
   elements.playerList.replaceChildren();
   for (const player of room.players) {
     const identity = el("div", { className: "player-identity" }, [
@@ -368,12 +865,21 @@ function renderRoom(room) {
   elements.startButton.classList.toggle("hidden", !isHost);
   elements.startButton.disabled =
     room.players.some((player) => !player.ready) || (room.mode === "pvp" && room.players.length < 2);
+  if (endless && !isHost && room.saveLabel) {
+    elements.missionDescription.textContent += ` 当前存档点：${room.saveLabel}。`;
+  }
+  renderRoomSavePoints();
 }
 
 function showScreen(name) {
   elements.lobby.classList.toggle("hidden", name !== "lobby");
   elements.room.classList.toggle("hidden", name !== "room");
   elements.game.classList.toggle("hidden", name !== "game");
+  if (name === "lobby") {
+    renderAccount();
+    renderAccountSaves();
+  }
+  if (name === "room") renderRoomSavePoints();
 }
 
 function resizeCanvas() {
@@ -384,11 +890,16 @@ function resizeCanvas() {
 }
 
 function renderHud(snapshot) {
-  const remaining = Math.max(0, snapshot.duration - snapshot.elapsed);
-  const minutes = Math.floor(remaining / 60);
-  const seconds = Math.floor(remaining % 60);
-  elements.timerLabel.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  if (state.room?.mode === "pve") elements.waveLabel.textContent = `第 ${snapshot.wave} 波`;
+  if (snapshot.endless) {
+    // 无尽模式没有终点，计时器改为显示已生存时间
+    elements.timerLabel.textContent = formatClock(snapshot.elapsed);
+    elements.timerLabel.title = "已生存时间";
+    elements.waveLabel.textContent = `无尽 · 第 ${snapshot.wave} 波`;
+  } else {
+    elements.timerLabel.textContent = formatClock((snapshot.duration ?? 0) - snapshot.elapsed);
+    elements.timerLabel.title = "剩余时间";
+    if (state.room?.mode === "pve" || snapshot.mode === "pve") elements.waveLabel.textContent = `第 ${snapshot.wave} 波`;
+  }
   if (snapshot.phase === "peace") {
     elements.phaseLabel.textContent = `和平时间 ${Math.ceil(snapshot.phaseTimer)}s · Tab 打开商店`;
     elements.phaseLabel.classList.remove("hidden");
@@ -693,5 +1204,7 @@ function showToast(message) {
   state.toastTimer = setTimeout(() => elements.toast.classList.add("hidden"), 2600);
 }
 
+renderAccount();
+renderAccountSaves();
 resizeCanvas();
 draw();

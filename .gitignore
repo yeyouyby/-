@@ -1,3 +1,7 @@
 node_modules/
 .env
 npm-debug.log*
+
+# 服务器运行数据（明文账号、存档、备份），随服务器迁移单独拷贝，不进入版本库
+data/
+lan-battle-backup-*.json
