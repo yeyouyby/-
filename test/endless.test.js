@@ -265,3 +265,92 @@ test("地图在无尽模式中保持一致（存档续玩不会换图）", () =>
     game.map.platforms.map((platform) => [platform.x, platform.y, platform.width]),
   );
 });
+
+test("【回归】真实 tick 循环下无尽模式会刷怪、推进波次并自动存档", () => {
+  // 曾经的 bug：update() 只对精确的 pve 模式调用 updatePve，
+  // 导致无尽模式在真实对局中永不刷怪、永不推进波次。
+  const cleared = [];
+  const { game } = createGame("endless", 2, { onWaveCleared: (session) => cleared.push(session.wave) });
+  for (let i = 0; i < 30 * 3; i += 1) game.update(1 / 30); // 模拟 3 秒真实循环
+  assert.ok(game.enemies.size > 0, "无尽模式必须在真实 tick 循环中刷怪");
+
+  // 玩家自动锁定的目标必须是怪物，而不是队友
+  const target = game.findTarget(game.players.get("player-0"));
+  assert.ok(target && game.enemies.has(target.id), "无尽模式的自动锁定目标是怪物");
+
+  // 推进到波次结束后应进入和平时间并触发自动存档回调
+  game.phaseTimer = 0.01;
+  for (let i = 0; i < 5; i += 1) game.update(1 / 30);
+  assert.equal(game.phase, "peace");
+  assert.deepEqual(cleared, [1]);
+});
+
+test("【回归】无尽模式的弹丸命中怪物而不是队友", () => {
+  const { game } = createGame("endless", 2);
+  const shooter = game.players.get("player-0");
+  const teammate = game.players.get("player-1");
+  const enemy = game.spawnEnemy();
+  enemy.x = shooter.x + 40;
+  enemy.y = shooter.y;
+  teammate.x = shooter.x + 40;
+  teammate.y = shooter.y;
+  const hpBefore = teammate.hp;
+
+  const projectile = {
+    id: "p",
+    ownerId: shooter.id,
+    x: enemy.x,
+    y: enemy.y,
+    radius: 6,
+    damage: 10,
+    pierce: 0,
+    life: 1,
+    hitTargets: [],
+  };
+  game.projectiles.set(projectile.id, projectile);
+  game.updateProjectiles(1 / 30);
+
+  assert.ok(enemy.hp < enemy.maxHp, "弹丸应命中怪物");
+  assert.equal(teammate.hp, hpBefore, "无尽模式队友之间不应互相伤害");
+});
+
+test("【回归】全员掉线时冻结推进（不刷波次、不自动存档）", () => {
+  const cleared = [];
+  const { game } = createGame("endless", 2, { onWaveCleared: (session) => cleared.push(session.wave) });
+  game.markDisconnected("player-0");
+  game.markDisconnected("player-1");
+  const elapsedBefore = game.elapsed;
+  game.phaseTimer = 0.01;
+
+  for (let i = 0; i < 60; i += 1) game.update(1 / 30); // 模拟 2 秒无人连接
+
+  assert.equal(game.elapsed, elapsedBefore, "没人连接时不应推进时间");
+  assert.equal(game.phase, "combat", "没人连接时不应推进到和平时间");
+  assert.equal(game.enemies.size, 0);
+  assert.equal(cleared.length, 0, "没人连接时不应触发自动存档");
+
+  // 重连后恢复推进
+  game.reconnectPlayer("player-0", "player-0-back");
+  game.update(1 / 30);
+  assert.ok(game.elapsed > elapsedBefore, "重连后应继续推进");
+});
+
+test("【回归】从 Boss 波存档点继续时会补刷该波 Boss", () => {
+  const { game } = createGame("endless", 1, { accountIds: ["acct-alice"] });
+  game.wave = 5;
+  game.phase = "combat";
+  const state = game.captureSaveState();
+
+  const { game: resumed } = createGame("endless", 1, { accountIds: ["acct-alice"], save: { state } });
+  assert.equal(resumed.wave, 5);
+  assert.equal(resumed.phase, "combat");
+  assert.ok(
+    [...resumed.enemies.values()].some((enemy) => enemy.boss),
+    "第 5 波续玩时必须存在 Boss",
+  );
+
+  // 非 Boss 波续玩不会凭空出现 Boss
+  const normalState = { ...state, wave: 4 };
+  const { game: normal } = createGame("endless", 1, { accountIds: ["acct-alice"], save: { state: normalState } });
+  assert.equal(normal.enemies.size, 0);
+});

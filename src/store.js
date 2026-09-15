@@ -380,8 +380,12 @@ export class DataStore {
       this.markDirty("accounts");
       return null;
     }
-    session.lastSeenAt = new Date().toISOString();
-    this.markDirty("accounts");
+    // lastSeenAt 每 60 秒落盘一次即可，避免高频校验时反复写文件
+    const lastSeen = Date.parse(session.lastSeenAt ?? "") || 0;
+    if (Date.now() - lastSeen > 60_000) {
+      session.lastSeenAt = new Date().toISOString();
+      this.markDirty("accounts");
+    }
     return { session, account };
   }
 
@@ -475,6 +479,19 @@ export class DataStore {
     this.saves.set(save.id, save);
     this.markDirty("saves");
     return save;
+  }
+
+  /** 清理孤立的存档（归属账号已不存在） */
+  pruneOrphanSaves() {
+    let removed = 0;
+    for (const [id, save] of [...this.saves]) {
+      if (!this.getAccountById(save.accountId)) {
+        this.saves.delete(id);
+        removed += 1;
+      }
+    }
+    if (removed) this.markDirty("saves");
+    return removed;
   }
 
   updateSave(saveId, { state, label, roomName } = {}) {
@@ -582,7 +599,7 @@ export class DataStore {
       mode,
       importedAt: new Date().toISOString(),
       accounts: { added: 0, updated: 0, skipped: 0 },
-      saves: { added: 0, updated: 0, skipped: 0 },
+      saves: { added: 0, updated: 0, skipped: 0, removed: 0, orphaned: 0 },
       sessions: { imported: 0 },
       adminKeyPreserved: true,
       preImportBackup: null,
@@ -596,9 +613,16 @@ export class DataStore {
         this.accounts.clear();
         this.sessions.clear();
       }
-      if (hasSaves) this.saves.clear();
+      if (hasSaves) {
+        report.saves.removed = this.saves.size;
+        this.saves.clear();
+      }
     }
 
+    // 同一账号在两台服务器上的 id 可能不同：合并时保留本机 id，
+    // 并记录「备份 id -> 本机 id」的映射，用于重写存档与令牌的归属，
+    // 否则导入的存档会因为 accountId 对不上而对账号不可见。
+    const idMap = new Map();
     for (const raw of hasAccounts ? payload.accounts : []) {
       const account = this.normalizeAccountRecord(raw);
       if (!account) {
@@ -613,9 +637,11 @@ export class DataStore {
         existing.stats = { ...existing.stats, ...account.stats };
         existing.updatedAt = new Date().toISOString();
         this.accounts.set(key, existing);
+        idMap.set(account.id, existing.id);
         report.accounts.updated += 1;
       } else {
         this.accounts.set(key, account);
+        idMap.set(account.id, account.id);
         report.accounts.added += 1;
       }
     }
@@ -626,24 +652,41 @@ export class DataStore {
         report.saves.skipped += 1;
         continue;
       }
-      const existing = this.saves.get(save.id);
-      if (existing) {
-        this.saves.set(save.id, save);
-        report.saves.updated += 1;
-      } else {
-        this.saves.set(save.id, save);
-        report.saves.added += 1;
+      save.accountId = idMap.get(save.accountId) ?? save.accountId;
+      // 存档内保存的玩家归属同样需要重映射，续玩时才能匹配到正确账号
+      if (Array.isArray(save.state?.players)) {
+        for (const savedPlayer of save.state.players) {
+          if (savedPlayer?.accountId && idMap.has(savedPlayer.accountId)) {
+            savedPlayer.accountId = idMap.get(savedPlayer.accountId);
+          }
+        }
       }
+      // id 对不上时按账号名兜底匹配（例如只导入存档的备份）
+      let owner = this.getAccountById(save.accountId);
+      if (!owner && save.username) owner = this.findAccount(save.username);
+      if (!owner) {
+        // 没有对应账号的存档无法被任何账号使用，直接丢弃并统计
+        report.saves.orphaned += 1;
+        continue;
+      }
+      save.accountId = owner.id;
+      save.username = owner.username;
+      const existing = this.saves.get(save.id);
+      this.saves.set(save.id, save);
+      if (existing) report.saves.updated += 1;
+      else report.saves.added += 1;
     }
 
     if (hasAccounts && Array.isArray(payload.sessions)) {
       for (const raw of payload.sessions) {
         const token = ensureString(raw?.token);
-        if (!token || !this.getAccountById(ensureString(raw.accountId))) continue;
+        const accountId = idMap.get(ensureString(raw.accountId)) ?? ensureString(raw.accountId);
+        const account = this.getAccountById(accountId);
+        if (!token || !account) continue;
         this.sessions.set(token, {
           token,
-          accountId: ensureString(raw.accountId),
-          username: ensureString(raw.username),
+          accountId: account.id,
+          username: account.username,
           createdAt: ensureString(raw.createdAt, new Date().toISOString()),
           lastSeenAt: new Date().toISOString(),
           expiresAt: ensureNumber(raw.expiresAt, this.defaultSessionExpiry()),
@@ -651,6 +694,10 @@ export class DataStore {
         report.sessions.imported += 1;
       }
     }
+
+    // 导入后清掉没有归属账号的旧存档，避免留下任何账号都读不到的记录
+    // （例如只包含 accounts 的覆盖还原会把旧存档全部变成孤立数据）
+    report.saves.orphaned += this.pruneOrphanSaves();
 
     // 管理密钥始终沿用本机现有密钥，避免一份泄露的备份文件直接接管服务器
     if (payload.server?.adminKey && payload.server.adminKey !== this.server.adminKey) {

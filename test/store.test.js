@@ -216,3 +216,92 @@ test("管理密钥校验使用恒定时间比较", () => {
   assert.equal(store.verifyAdminKey(undefined), false);
   store.close();
 });
+
+test("【回归】合并导入会重映射账号 id，存档不会变成孤儿", () => {
+  const { store } = createStore();
+  // 本机已有同名账号，但 id 与备份来源不同（换服务器场景）
+  const local = store.registerAccount({ username: "alice", password: "oldpass1" });
+  const backup = {
+    format: "lan-battle-backup",
+    version: 1,
+    accounts: [{ id: "acct_from_other_server", username: "alice", displayName: "爱丽丝", password: "pass1234", stats: { kills: 3 } }],
+    saves: [
+      {
+        id: "save-migrated",
+        accountId: "acct_from_other_server",
+        username: "alice",
+        mode: "endless",
+        label: "无尽 · 第 9 波",
+        status: "active",
+        wave: 9,
+        state: { wave: 9, players: [{ accountId: "acct_from_other_server", name: "爱丽丝", stats: {} }] },
+      },
+    ],
+    sessions: [{ token: "migrated-token", accountId: "acct_from_other_server", username: "alice" }],
+  };
+
+  const report = store.importBackup(backup, { mode: "merge" });
+  assert.equal(report.accounts.updated, 1);
+  assert.equal(report.saves.added, 1);
+  assert.equal(report.saves.orphaned, 0);
+
+  const save = store.getSave("save-migrated");
+  assert.equal(save.accountId, local.id, "存档归属应重映射到本机账号 id");
+  assert.equal(store.listSaves(local.id).length, 1, "本机账号必须能看到导入的存档");
+  assert.equal(save.state.players[0].accountId, local.id, "存档内的玩家归属同样要重映射");
+  assert.equal(store.resolveSession("migrated-token").account.id, local.id, "登录令牌也要指向本机账号");
+  store.close();
+});
+
+test("【回归】只含 accounts 的覆盖还原不会留下无法访问的旧存档", () => {
+  // 备份里带不带 saves 字段都必须清干净，否则旧存档会变成任何账号都读不到的垃圾数据
+  for (const payload of [
+    { format: "lan-battle-backup", version: 1, accounts: [{ username: "newbie", password: "pass1234" }] },
+    { format: "lan-battle-backup", version: 1, accounts: [{ username: "newbie", password: "pass1234" }], saves: [] },
+  ]) {
+    const { store } = createStore();
+    const alice = store.registerAccount({ username: "alice", password: "pass1234" });
+    store.createSave({ accountId: alice.id, username: alice.username, state: fakeSaveState(3) });
+    assert.equal(store.saves.size, 1);
+
+    const report = store.importBackup(payload, { mode: "replace" });
+    assert.equal(report.accounts.added, 1);
+    assert.equal(store.saves.size, 0, "不应留下任何账号都读不到的存档");
+    assert.equal(store.pruneOrphanSaves(), 0, "导入后不应还存在孤立存档");
+    const accounted = report.saves.added + report.saves.updated + report.saves.orphaned + (report.saves.removed ?? 0);
+    assert.equal(accounted, 1, "被清理的旧存档应出现在报告里");
+    store.close();
+  }
+});
+
+test("【回归】未包含账号的存档导入会按账号名匹配已有账号", () => {
+  const { store } = createStore();
+  const local = store.registerAccount({ username: "bob", password: "pass1234" });
+  const report = store.importBackup({
+    format: "lan-battle-backup",
+    version: 1,
+    saves: [{ id: "save-only", accountId: "acct_unknown", username: "bob", status: "active", wave: 4, state: { wave: 4, players: [] } }],
+  });
+
+  assert.equal(report.saves.added, 1);
+  assert.equal(report.saves.orphaned, 0);
+  assert.equal(store.getSave("save-only").accountId, local.id);
+  assert.equal(store.listSaves(local.id).length, 1);
+  store.close();
+});
+
+test("【回归】导出再导入到全新服务器后，存档仍属于同一个账号", () => {
+  const { store } = createStore();
+  const alice = store.registerAccount({ username: "alice", password: "pass1234" });
+  store.createSave({ accountId: alice.id, username: alice.username, state: fakeSaveState(7) });
+  const backup = store.exportBackup();
+  store.close();
+
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), "lan-battle-store-move-"));
+  const fresh = new DataStore({ directory: target, adminKey: "fresh-key" });
+  fresh.importBackup(backup, { mode: "replace" });
+  const moved = fresh.listSaves(fresh.findAccount("alice").id);
+  assert.equal(moved.length, 1);
+  assert.equal(moved[0].wave, 7);
+  fresh.close();
+});

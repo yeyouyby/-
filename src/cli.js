@@ -73,7 +73,7 @@ function importBackup(store, args) {
   const report = store.importBackup(payload, { mode });
   console.log(`导入完成（${mode === "merge" ? "合并" : "覆盖"}）: ${path.resolve(file)}`);
   console.log(`账号：新增 ${report.accounts.added}，更新 ${report.accounts.updated}，跳过 ${report.accounts.skipped}`);
-  console.log(`存档：新增 ${report.saves.added}，更新 ${report.saves.updated}，跳过 ${report.saves.skipped}`);
+  console.log(`存档：新增 ${report.saves.added}，更新 ${report.saves.updated}，跳过 ${report.saves.skipped}，覆盖清理 ${report.saves.removed ?? 0}，清理孤立 ${report.saves.orphaned ?? 0}`);
   console.log(`登录令牌：恢复 ${report.sessions.imported}`);
   if (report.preImportBackup) console.log(`导入前的原数据已备份为: ${report.preImportBackup}`);
   console.log(`当前管理密钥（沿用本机密钥）: ${store.stats().adminKey}`);
@@ -95,7 +95,7 @@ function restoreBackup(store, fileName) {
   const { fileName: name, report } = store.restoreBackupFile(fileName, { mode: "replace" });
   console.log(`已用快照 ${name} 还原数据`);
   console.log(`账号：新增 ${report.accounts.added}，更新 ${report.accounts.updated}`);
-  console.log(`存档：新增 ${report.saves.added}，更新 ${report.saves.updated}`);
+  console.log(`存档：新增 ${report.saves.added}，更新 ${report.saves.updated}，覆盖清理 ${report.saves.removed ?? 0}，清理孤立 ${report.saves.orphaned ?? 0}`);
   return 0;
 }
 

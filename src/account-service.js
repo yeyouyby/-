@@ -15,7 +15,9 @@ export class AccountService {
     this.io = io;
     this.roomManager = roomManager;
     this.logger = logger;
-    this.failures = new Map(); // socket.id -> { count, lockedUntil }
+    // 登录节流按「账号名」与「来源地址」记录，而不按 socket.id：
+    // 否则攻击者只要在每次尝试后重连就能拿到新的 socket.id 绕过锁定。
+    this.failures = new Map();
   }
 
   bind(socket) {
@@ -41,28 +43,57 @@ export class AccountService {
     handle("account:delete", (payload) => this.deleteAccount(socket, payload));
     handle("account:delete-save", (payload) => this.deleteSave(socket, payload));
     handle("account:saves", () => this.sendSaves(socket));
-
-    socket.on("disconnect", () => this.failures.delete(socket.id));
   }
 
   /* ---------------------------------------------------------------- 登录 */
 
-  assertNotLocked(socket) {
-    const state = this.failures.get(socket.id);
-    if (state?.lockedUntil && state.lockedUntil > Date.now()) {
-      const seconds = Math.ceil((state.lockedUntil - Date.now()) / 1000);
-      throw new Error(`登录尝试过于频繁，请 ${seconds} 秒后再试`);
+  /** 失败计数同时挂在账号名与来源地址上，重连不会重置 */
+  failureKeys(payload = {}, socket = null) {
+    const keys = [];
+    const username = String(payload.username ?? "").trim().toLowerCase();
+    if (username) keys.push(`user:${username}`);
+    const address = socket?.handshake?.address;
+    if (address) keys.push(`ip:${address}`);
+    return keys;
+  }
+
+  pruneFailures() {
+    const now = Date.now();
+    for (const [key, state] of this.failures) {
+      if (state.lockedUntil > now) continue;
+      // 已解锁且超过两倍锁定时长没有新失败记录时即可清理，避免内存无限增长
+      if (now - (state.updatedAt ?? 0) > LOGIN_LOCK_MS * 2) this.failures.delete(key);
     }
   }
 
-  noteFailure(socket) {
-    const state = this.failures.get(socket.id) ?? { count: 0, lockedUntil: 0 };
-    state.count += 1;
-    if (state.count >= MAX_LOGIN_FAILURES) {
-      state.count = 0;
-      state.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+  assertNotLocked(socket, payload) {
+    this.pruneFailures();
+    const now = Date.now();
+    for (const key of this.failureKeys(payload, socket)) {
+      const state = this.failures.get(key);
+      if (state?.lockedUntil > now) {
+        const seconds = Math.ceil((state.lockedUntil - now) / 1000);
+        throw new Error(`登录尝试过于频繁，请 ${seconds} 秒后再试`);
+      }
     }
-    this.failures.set(socket.id, state);
+  }
+
+  noteFailure(socket, payload) {
+    const now = Date.now();
+    for (const key of this.failureKeys(payload, socket)) {
+      const state = this.failures.get(key) ?? { count: 0, lockedUntil: 0, updatedAt: now };
+      state.count += 1;
+      state.updatedAt = now;
+      if (state.count >= MAX_LOGIN_FAILURES) {
+        state.count = 0;
+        state.lockedUntil = now + LOGIN_LOCK_MS;
+      }
+      this.failures.set(key, state);
+    }
+  }
+
+  clearFailures(socket, payload) {
+    for (const key of this.failureKeys(payload, socket)) this.failures.delete(key);
   }
 
   register(socket, payload) {
@@ -78,15 +109,15 @@ export class AccountService {
 
   login(socket, payload) {
     if (socket.data.accountId) throw new Error("当前已登录，请先退出账号");
-    this.assertNotLocked(socket);
+    this.assertNotLocked(socket, payload);
     let account;
     try {
       account = this.store.verifyCredentials(payload.username, payload.password);
     } catch (error) {
-      this.noteFailure(socket);
+      this.noteFailure(socket, payload);
       throw error;
     }
-    this.failures.delete(socket.id);
+    this.clearFailures(socket, payload);
     const session = this.store.createSession(account);
     return this.attach(socket, account, session, { created: false });
   }
@@ -129,12 +160,32 @@ export class AccountService {
     return { loggedOut: true };
   }
 
+  /**
+   * 校验连接上的账号：不仅要求账号存在，还要求当前令牌在服务器上仍然有效。
+   * 这样在「修改密码 / 导入还原覆盖数据」等使令牌失效的场景下，
+   * 旧连接无法继续以旧身份操作账号数据。
+   */
   requireAccount(socket) {
     const accountId = socket.data.accountId;
     if (!accountId) throw new Error("请先登录账号");
-    const account = this.store.getAccountById(accountId);
-    if (!account) throw new Error("账号已不存在，请重新登录");
-    return account;
+    const token = socket.data.accountToken;
+    const resolved = token ? this.store.resolveSession(token) : null;
+    if (!resolved || resolved.account.id !== accountId) {
+      this.invalidate(socket, "登录状态已失效，请重新登录");
+      throw new Error("登录状态已失效，请重新登录");
+    }
+    return resolved.account;
+  }
+
+  /** 令牌失效时清理连接上的身份与房间绑定，并让客户端回到未登录状态 */
+  invalidate(socket, message) {
+    const accountId = socket.data.accountId;
+    if (accountId) socket.leave(accountChannel(accountId));
+    socket.data.accountId = null;
+    socket.data.username = null;
+    socket.data.accountToken = null;
+    this.roomManager?.updateAccountBinding(socket, null);
+    socket.emit("account:session", { token: null, account: null, saves: [], reason: message });
   }
 
   sendProfile(socket) {

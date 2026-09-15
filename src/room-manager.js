@@ -11,7 +11,6 @@ export class RoomManager {
     this.maxPlayers = options.maxPlayers ?? MAX_PLAYERS;
     this.rejoinGraceMs = options.rejoinGraceMs ?? REJOIN_GRACE_MS;
     this.store = options.store ?? null; // DataStore：账号 + 无尽模式存档
-    this.lastSaveAt = 0;
   }
 
   createRoom(socket, payload = {}) {
@@ -33,6 +32,7 @@ export class RoomManager {
       game: null,
       saveId: null,
       saveLabel: null,
+      lastSavedAt: 0, // 该房间最近一次自动存档时间（按房间节流）
       createdAt: Date.now(),
     };
     this.rooms.set(code, room);
@@ -300,6 +300,8 @@ export class RoomManager {
       gamePlayer.username = player.username;
       gamePlayer.name = player.name;
     }
+    // 换号（登录 / 退出 / 换账号）后不再拥有原账号的存档点，避免继续使用他人存档
+    this.reassignSavePoint(room);
     this.broadcastRoom(room);
     return player;
   }
@@ -310,6 +312,13 @@ export class RoomManager {
     if (!room.saveId || !this.store) return null;
     const save = this.store.getSave(room.saveId);
     if (!save || save.status !== "active") return null;
+    // 存档归属校验：房主必须正是该存档的账号，避免换号后沿用他人的存档
+    const host = room.players.get(room.hostId);
+    if (!host?.accountId || save.accountId !== host.accountId) {
+      room.saveId = null;
+      room.saveLabel = null;
+      return null;
+    }
     room.saveLabel = save.label;
     return save;
   }
@@ -356,14 +365,17 @@ export class RoomManager {
   saveProgress(room, game, { reason = "auto", force = false } = {}) {
     if (!this.store || room.mode !== "endless" || !game || game.ended) return null;
     const now = Date.now();
-    if (!force && reason === "wave" && now - this.lastSaveAt < AUTOSAVE_MIN_INTERVAL_MS) return null;
+    // 自动存档按房间节流：不同房间之间的自动存档互不影响
+    if (!force && reason === "wave" && now - (room.lastSavedAt ?? 0) < AUTOSAVE_MIN_INTERVAL_MS) return null;
     const host = room.players.get(room.hostId);
     if (!host?.accountId) {
       this.io.to(room.hostId).emit("save:error", { message: "房主登录账号后才能保存无尽进度" });
       return null;
     }
+    if (!game.hasConnectedPlayers()) return null; // 没人连接时不写存档
     const state = game.captureSaveState();
     let save = room.saveId ? this.store.getSave(room.saveId) : null;
+    if (save && save.accountId !== host.accountId) save = null; // 换号后不覆盖他人存档
     try {
       if (!save || save.accountId !== host.accountId || save.status !== "active") {
         save = this.store.createSave({
@@ -381,7 +393,7 @@ export class RoomManager {
       this.io.to(room.hostId).emit("save:error", { message: `保存失败：${error.message}` });
       return null;
     }
-    this.lastSaveAt = now;
+    room.lastSavedAt = now;
     room.saveLabel = save.label;
     this.pushSaves(host.accountId);
     this.io.to(room.code).emit("game:event", {

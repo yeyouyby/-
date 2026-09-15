@@ -104,8 +104,13 @@ export function createServerInstance(options = {}) {
   }
 
   function start() {
-    return new Promise((resolve) => {
-      httpServer.listen(port, host, () => {
+    return new Promise((resolve, reject) => {
+      const onListenError = (error) => {
+        httpServer.removeListener("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        httpServer.removeListener("error", onListenError);
         const address = httpServer.address();
         const activePort = address && typeof address === "object" ? address.port : port;
         instance.port = activePort;
@@ -118,7 +123,9 @@ export function createServerInstance(options = {}) {
         const lastBackup = store.stats().server.lastBackupFile;
         if (lastBackup) logger.log(`最近一次自动备份: ${lastBackup}`);
         resolve({ port: activePort, host });
-      });
+      };
+      httpServer.once("error", onListenError);
+      httpServer.listen(port, host, onListening);
     });
   }
 

@@ -338,10 +338,13 @@ socket.on("account:session", (payload = {}) => {
     }
   } else {
     localStorage.removeItem("lanBattleAccountToken");
-    if (hadAccount) showToast("已退出账号");
+    // 服务端主动失效（改密 / 导入还原覆盖数据）时会带上原因
+    if (payload.reason) showToast(payload.reason);
+    else if (hadAccount) showToast("已退出账号");
   }
   renderAccount();
   renderAccountSaves();
+  renderRoomSavePoints();
 });
 socket.on("account:profile", ({ account: profile } = {}) => {
   if (!profile) return;
@@ -742,7 +745,6 @@ function renderAdminBackups(backups) {
     return;
   }
   for (const backup of backups) {
-    const key = elements.adminKey.value.trim();
     const row = el("div", { className: "save-row" }, [
       el("div", { className: "save-row-main" }, [
         el("strong", { text: backup.file }),
@@ -750,7 +752,9 @@ function renderAdminBackups(backups) {
       ]),
     ]);
     const actions = el("div", { className: "save-row-actions" });
-    const download = el("a", { className: "text-button", text: "下载", attrs: { href: `/api/admin/backups/${encodeURIComponent(backup.file)}?key=${encodeURIComponent(key)}`, download: backup.file } });
+    // 管理密钥通过请求头传递，不放进 URL（避免出现在历史记录、日志与 Referer 中）
+    const download = el("button", { className: "text-button", text: "下载" });
+    download.addEventListener("click", () => downloadBackupFile(backup.file));
     const restore = el("button", { className: "text-button danger", text: "还原" });
     restore.addEventListener("click", async () => {
       if (!window.confirm(`用快照 ${backup.file} 覆盖当前服务器数据？（会先自动备份当前数据）`)) return;
@@ -769,30 +773,43 @@ function renderAdminBackups(backups) {
   }
 }
 
-async function exportBackupFile() {
+/** 带管理密钥请求文件并用 blob 下载（密钥只走请求头，不进入 URL） */
+async function downloadWithAdminKey(path, fallbackName) {
   const key = adminKeyValue();
-  if (!key) return;
+  if (!key) return null;
   try {
-    const response = await fetch("/api/admin/export", { headers: { "x-admin-key": key } });
+    const response = await fetch(path, { headers: { "x-admin-key": key } });
     if (!response.ok) {
-      showToast(`导出失败（HTTP ${response.status}）`);
-      return;
+      showToast(`下载失败（HTTP ${response.status}）`);
+      return null;
     }
     const disposition = response.headers.get("content-disposition") ?? "";
     const match = /filename="([^"]+)"/.exec(disposition);
+    const fileName = match?.[1] ?? fallbackName;
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = match?.[1] ?? `lan-battle-backup-${Date.now()}.json`;
+    anchor.download = fileName;
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
-    adminLog(`已导出备份 ${anchor.download}（明文，包含账号与存档，请妥善保管）`);
+    return fileName;
   } catch (error) {
-    showToast(`导出失败：${error.message}`);
+    showToast(`下载失败：${error.message}`);
+    return null;
   }
+}
+
+async function exportBackupFile() {
+  const fileName = await downloadWithAdminKey("/api/admin/export", `lan-battle-backup-${Date.now()}.json`);
+  if (fileName) adminLog(`已导出备份 ${fileName}（明文，包含账号与存档，请妥善保管）`);
+}
+
+async function downloadBackupFile(file) {
+  const fileName = await downloadWithAdminKey(`/api/admin/backups/${encodeURIComponent(file)}`, file);
+  if (fileName) adminLog(`已下载快照 ${fileName}`);
 }
 
 async function importBackupFile(mode) {
@@ -817,7 +834,7 @@ async function importBackupFile(mode) {
   if (!result) return;
   const report = result.report ?? {};
   adminLog(
-    `${label}完成：账号 +${report.accounts?.added ?? 0}/~${report.accounts?.updated ?? 0}，存档 +${report.saves?.added ?? 0}/~${report.saves?.updated ?? 0}，令牌恢复 ${report.sessions?.imported ?? 0}；原数据快照 ${report.preImportBackup ?? "无"}`,
+    `${label}完成：账号 +${report.accounts?.added ?? 0}/~${report.accounts?.updated ?? 0}，存档 +${report.saves?.added ?? 0}/~${report.saves?.updated ?? 0}，令牌恢复 ${report.sessions?.imported ?? 0}，覆盖清理 ${report.saves?.removed ?? 0}，清理孤立存档 ${report.saves?.orphaned ?? 0}；原数据快照 ${report.preImportBackup ?? "无"}`,
   );
   showToast(`${label}完成`);
   elements.adminImportFile.value = "";
@@ -935,7 +952,10 @@ function renderHud(snapshot) {
 function renderShopModal() {
   const self = state.snapshot?.players.find((player) => player.id === socket.id);
   const gold = self?.gold ?? 0;
-  const canShop = state.room?.mode !== "pve" || state.snapshot?.phase === "peace";
+  const roomMode = state.room?.mode ?? state.snapshot?.mode;
+  // 合作类玩法（固定波次 / 无尽）的商店只在和平时间开放，与服务端限制保持一致
+  const coop = roomMode === "pve" || roomMode === "endless";
+  const canShop = !coop || state.snapshot?.phase === "peace";
   elements.shopGold.textContent = `${gold} 金币${canShop ? "" : "（仅和平时间可购买）"}`;
   elements.shopServices.replaceChildren();
   for (const service of state.services) {

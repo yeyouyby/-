@@ -282,3 +282,136 @@ test("登录失败会被拒绝，密码可以修改且旧令牌失效", async (t
   assert.equal(instance.store.accounts.size, 0);
   assert.equal(instance.store.getSave(save.id), null);
 });
+
+test("【回归】端到端：无尽模式对局中真的会刷怪", async (t) => {
+  const { instance, dataDirectory, baseUrl } = await bootServer();
+  const sockets = [];
+  t.after(async () => {
+    for (const socket of sockets) socket.close();
+    await instance.close();
+    fs.rmSync(dataDirectory, { recursive: true, force: true });
+  });
+
+  const host = await connectClient(baseUrl);
+  sockets.push(host);
+  await emitAck(host, "account:register", { username: "endless", password: "pass1234" });
+  const created = await emitAck(host, "room:create", { playerName: "无尽", mode: "endless" });
+  assert.equal(created.ok, true, created.error);
+  await emitAck(host, "game:start");
+
+  // 收集真实快照，确认怪物出现在客户端可见状态里
+  const enemyCounts = [];
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, 6000);
+    host.on("game:snapshot", (snapshot) => {
+      enemyCounts.push(snapshot.enemies.length);
+      assert.equal(snapshot.endless, true);
+      if (snapshot.enemies.length > 0) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  assert.ok(enemyCounts.some((count) => count > 0), `无尽模式快照中必须出现怪物，实际：${enemyCounts.join(",")}`);
+});
+
+test("【回归】登录失败锁定不会被重连绕过", async (t) => {
+  const { instance, dataDirectory, baseUrl } = await bootServer();
+  const sockets = [];
+  const openSocket = async () => {
+    const socket = await connectClient(baseUrl);
+    sockets.push(socket);
+    return socket;
+  };
+  t.after(async () => {
+    for (const socket of sockets) socket.close();
+    await instance.close();
+    fs.rmSync(dataDirectory, { recursive: true, force: true });
+  });
+
+  const setup = await openSocket();
+  const registered = await emitAck(setup, "account:register", { username: "bruteforce", password: "pass1234" });
+  assert.equal(registered.ok, true, registered.error);
+  await emitAck(setup, "account:logout");
+
+  // 失败两次后用正确密码登录：计数应被清零
+  const patient = await openSocket();
+  await emitAck(patient, "account:login", { username: "bruteforce", password: "wrong" });
+  await emitAck(patient, "account:login", { username: "bruteforce", password: "wrong" });
+  const recovered = await emitAck(patient, "account:login", { username: "bruteforce", password: "pass1234" });
+  assert.equal(recovered.ok, true, recovered.error);
+  await emitAck(patient, "account:logout");
+
+  // 每次失败都换一条新连接（新的 socket.id），锁定依然生效
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const attacker = await openSocket();
+    const result = await emitAck(attacker, "account:login", { username: "bruteforce", password: "guess" });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /账号或密码错误/);
+  }
+  const blocked = await emitAck(await openSocket(), "account:login", { username: "bruteforce", password: "pass1234" });
+  assert.equal(blocked.ok, false, "重连后仍然应该被锁定");
+  assert.match(blocked.error, /登录尝试过于频繁/);
+});
+
+test("【回归】令牌被撤销后旧连接不能再操作账号，且房间绑定被清理", async (t) => {
+  const { instance, dataDirectory, baseUrl } = await bootServer();
+  const sockets = [];
+  t.after(async () => {
+    for (const socket of sockets) socket.close();
+    await instance.close();
+    fs.rmSync(dataDirectory, { recursive: true, force: true });
+  });
+
+  const host = await connectClient(baseUrl);
+  sockets.push(host);
+  const registered = await emitAck(host, "account:register", { username: "revoked", password: "pass1234", displayName: "被撤销" });
+  assert.equal(registered.ok, true, registered.error);
+  const token = registered.session.token;
+
+  const created = await emitAck(host, "room:create", { playerName: "被撤销", mode: "endless" });
+  assert.equal(created.ok, true, created.error);
+  const room = instance.roomManager.rooms.get(created.room.code);
+  assert.equal(room.players.get(host.id).accountId, registered.session.account.id);
+
+  // 模拟改密 / 导入还原导致令牌失效
+  instance.store.revokeSession(token);
+  const sessionEvents = [];
+  host.on("account:session", (payload) => sessionEvents.push(payload));
+
+  const rename = await emitAck(host, "account:rename", { displayName: "黑客" });
+  assert.equal(rename.ok, false);
+  assert.match(rename.error, /登录状态已失效/);
+  const saves = await emitAck(host, "account:saves");
+  assert.equal(saves.ok, false);
+  const deleteSave = await emitAck(host, "account:delete-save", { saveId: "save_x" });
+  assert.equal(deleteSave.ok, false);
+
+  // 客户端会收到登出通知，房间里的账号绑定同步清空
+  assert.ok(sessionEvents.some((payload) => payload.token === null));
+  assert.equal(room.players.get(host.id).accountId, null);
+  assert.equal(instance.store.findAccount("revoked").displayName, "被撤销", "显示名不应被修改");
+});
+
+test("【回归】端口被占用时 start() 会立即报错而不是永久等待", async (t) => {
+  const { instance, dataDirectory, baseUrl } = await bootServer();
+  t.after(async () => {
+    await instance.close();
+    fs.rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  assert.ok(baseUrl);
+
+  const blocked = createServerInstance({
+    dataDirectory: fs.mkdtempSync(path.join(os.tmpdir(), "lan-battle-blocked-")),
+    adminKey: ADMIN_KEY,
+    host: "127.0.0.1",
+    port: instance.port,
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  t.after(() => {
+    blocked.store.close();
+    fs.rmSync(blocked.dataDirectory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(() => blocked.start(), (error) => error.code === "EADDRINUSE");
+});

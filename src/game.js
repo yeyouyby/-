@@ -362,7 +362,7 @@ export class GameSession {
   buyShopItem(playerId, itemId) {
     const player = this.players.get(playerId);
     if (!player || !player.alive) return false;
-    if (this.room.mode === "pve" && this.phase !== "peace") {
+    if (this.isCoop() && this.phase !== "peace") {
       this.io.to(playerId).emit("shop:error", { message: "商店仅在和平时间开放" });
       return false;
     }
@@ -464,12 +464,24 @@ export class GameSession {
     };
   }
 
+  /** 合作玩法（固定波次 / 无尽）共用波次、商店、救援与怪物目标逻辑 */
+  isCoop() {
+    return this.endless || this.room.mode === "pve";
+  }
+
+  /** 是否还有在线玩家：全员掉线（刷新、断网、房主睡眠）时暂停推进，避免空房间刷波次和存档 */
+  hasConnectedPlayers() {
+    return [...this.players.values()].some((player) => !player.disconnected);
+  }
+
   update(dt) {
     if (this.ended) return;
+    if (this.players.size === 0) return; // 房间已空，交由上层停止对局
+    if (!this.hasConnectedPlayers()) return; // 全员掉线：冻结计时、波次与自动存档，等待重连
     this.elapsed += dt;
     this.tickNumber += 1;
     this.updatePlayers(dt);
-    if (this.room.mode === "pve") this.updatePve(dt);
+    if (this.isCoop()) this.updatePve(dt);
     this.updateOrbits(dt);
     this.updateProjectiles(dt);
     this.updatePickups(dt);
@@ -482,7 +494,7 @@ export class GameSession {
     for (const player of this.players.values()) {
       if (player.disconnected) continue;
       if (!player.alive) {
-        if (this.room.mode === "pve" && this.livingPlayers().length > 0) {
+        if (this.isCoop() && this.livingPlayers().length > 0) {
           player.downFor -= dt;
           if (player.downFor <= 0) this.revivePlayer(player);
         }
@@ -605,7 +617,7 @@ export class GameSession {
   healPulse(player) {
     for (const target of this.players.values()) {
       if (distanceSquared(player, target) > 460 * 460) continue;
-      if (!target.alive && this.room.mode === "pve") {
+      if (!target.alive && this.isCoop()) {
         target.alive = true;
         target.downFor = 0;
         target.invulnerableFor = 1.6;
@@ -740,15 +752,25 @@ export class GameSession {
     for (const player of this.livingPlayers()) {
       player.hp = Math.min(player.maxHp, player.hp + player.maxHp * 0.15);
     }
-    const bossWave = this.endless
-      ? this.wave % ENDLESS.bossEveryWaves === 0
-      : this.wave === 3 || this.wave === 5;
-    if (bossWave && !this.bossWavesSpawned.has(this.wave)) {
-      const count = this.endless ? 1 + Math.floor(this.wave / (ENDLESS.bossEveryWaves * 2)) : 1;
-      for (let index = 0; index < count; index += 1) this.spawnEnemy("boss");
-      this.bossWavesSpawned.add(this.wave);
-    }
+    if (this.isBossWave()) this.spawnWaveBosses();
     this.io.to(this.room.code).emit("game:event", { type: "wave", wave: this.wave, endless: this.endless });
+  }
+
+  /** 刷新当前波次的 Boss（数量随无尽波次递增） */
+  spawnWaveBosses() {
+    if (this.bossWavesSpawned.has(this.wave)) return 0;
+    const count = this.endless ? 1 + Math.floor(this.wave / (ENDLESS.bossEveryWaves * 2)) : 1;
+    let spawned = 0;
+    for (let index = 0; index < count; index += 1) {
+      if (this.spawnEnemy("boss")) spawned += 1;
+    }
+    this.bossWavesSpawned.add(this.wave);
+    return spawned;
+  }
+
+  /** 当前波次是否为 Boss 波 */
+  isBossWave() {
+    return this.endless ? this.wave % ENDLESS.bossEveryWaves === 0 : this.wave === 3 || this.wave === 5;
   }
 
   spawnEnemy(kind = "grunt") {
@@ -797,7 +819,7 @@ export class GameSession {
   }
 
   findTarget(player) {
-    const candidates = this.room.mode === "pve"
+    const candidates = this.isCoop()
       ? [...this.enemies.values()]
       : this.livingPlayers().filter((candidate) => candidate.id !== player.id && !candidate.disconnected);
     let closest = null;
@@ -908,7 +930,7 @@ export class GameSession {
         this.projectiles.delete(projectile.id);
         continue;
       }
-      const hit = this.room.mode === "pve"
+      const hit = this.isCoop()
         ? this.hitEnemy(projectile)
         : this.hitOpponent(projectile);
       if (hit) this.projectiles.delete(projectile.id);
@@ -1276,6 +1298,11 @@ export class GameSession {
       const saved = this.findSavedPlayer(savedPlayers, player);
       if (saved) this.applyPlayerState(player, saved);
       else this.grantCatchUp(player);
+    }
+    // 存档里不保存敌人：如果存档点停在 Boss 波的战斗阶段，需要补刷该波 Boss，
+    // 否则从第 5/10/… 波继续时会缺少本该出现的 Boss。
+    if (this.phase === "combat" && this.isCoop() && this.isBossWave()) {
+      this.spawnWaveBosses();
     }
     return true;
   }

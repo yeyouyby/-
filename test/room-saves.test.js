@@ -282,3 +282,72 @@ test("房间状态会带上存档点信息，退出到大厅后房间被清理",
   assert.equal(manager.rooms.size, 0);
   cleanup(manager, store);
 });
+
+test("【回归】自动存档按房间节流，一个房间不会拖慢另一个房间", () => {
+  const { manager, store } = createManager();
+  const alice = store.registerAccount({ username: "alice", password: "pass1234" });
+  const bob = store.registerAccount({ username: "bob", password: "pass1234" });
+
+  const hostA = createSocket("host-a", alice);
+  const roomA = manager.createRoom(hostA, { playerName: "A", mode: "endless" });
+  manager.startGame(hostA);
+  const hostB = createSocket("host-b", bob);
+  const roomB = manager.createRoom(hostB, { playerName: "B", mode: "endless" });
+  manager.startGame(hostB);
+
+  const saveA = manager.saveProgress(roomA, roomA.game, { reason: "wave" });
+  const saveB = manager.saveProgress(roomB, roomB.game, { reason: "wave" });
+  assert.ok(saveA, "第一个房间应能自动存档");
+  assert.ok(saveB, "3 秒内另一个房间同样应能自动存档");
+  assert.equal(store.listSaves(alice.id).length, 1);
+  assert.equal(store.listSaves(bob.id).length, 1);
+
+  // 同一个房间的连续自动存档仍然受节流保护
+  assert.equal(manager.saveProgress(roomA, roomA.game, { reason: "wave" }), null);
+  cleanup(manager, store);
+});
+
+test("【回归】房主换号后不再使用原账号的存档点", () => {
+  const { manager, store } = createManager();
+  const alice = store.registerAccount({ username: "alice", password: "pass1234" });
+  const mallory = store.registerAccount({ username: "mallory", password: "pass1234" });
+  const aliceSave = store.createSave({
+    accountId: alice.id,
+    username: alice.username,
+    state: { wave: 11, phase: "peace", players: [{ accountId: alice.id, name: "爱丽丝", stats: {} }] },
+  });
+
+  const host = createSocket("host", alice);
+  const room = manager.createRoom(host, { playerName: "爱丽丝", mode: "endless", saveId: aliceSave.id });
+  assert.equal(room.saveId, aliceSave.id);
+
+  // 同一连接退出登录：存档点必须立即失效
+  manager.updateAccountBinding(host, null);
+  assert.equal(room.saveId, null);
+  assert.equal(manager.loadSavePoint(room), null);
+
+  // 换另一个账号登录也不能使用原存档
+  manager.updateAccountBinding(host, mallory);
+  assert.throws(() => manager.setSavePoint(host, aliceSave.id), /找不到属于你的存档/);
+  assert.equal(room.saveId, null);
+  cleanup(manager, store);
+});
+
+test("【回归】开始对局时会再次校验存档归属", () => {
+  const { manager, store } = createManager();
+  const alice = store.registerAccount({ username: "alice", password: "pass1234" });
+  const bob = store.registerAccount({ username: "bob", password: "pass1234" });
+  const aliceSave = store.createSave({ accountId: alice.id, username: alice.username, state: { wave: 6, phase: "combat", players: [] } });
+
+  const host = createSocket("host", alice);
+  const room = manager.createRoom(host, { playerName: "爱丽丝", mode: "endless", saveId: aliceSave.id });
+  // 绕过 UI 直接把房间的归属账号改掉，模拟换号后仍残留 saveId 的情况
+  room.players.get("host").accountId = bob.id;
+  room.players.get("host").username = bob.username;
+
+  manager.startGame(host);
+  assert.equal(room.game.wave, 1, "换了账号后不应读到他人存档的波次");
+  assert.equal(room.saveId, null);
+  room.game.stop();
+  cleanup(manager, store);
+});
