@@ -51,6 +51,10 @@
                 <strong>竞技乱斗</strong>
                 <span>自动射击，最后一人获胜</span>
               </button>
+              <button class="mode-card" data-mode="endless">
+                <strong>无尽模式</strong>
+                <span>无限波次 · 自动存档 · 可从存档点继续</span>
+              </button>
             </div>
             <label>
               最大人数
@@ -84,6 +88,110 @@
               <div class="empty-state">正在侦察附近房间…</div>
             </div>
           </article>
+
+          <article class="panel account-panel">
+            <div class="panel-heading">
+              <span class="step">03</span>
+              <div>
+                <h2>账号与存档</h2>
+                <p>登录后可保存无尽模式进度，并从存档点继续</p>
+              </div>
+            </div>
+
+            <div id="account-guest">
+              <label>
+                账号名
+                <input id="account-username" maxlength="16" placeholder="2-16 位中文/字母/数字" autocomplete="username" />
+              </label>
+              <label>
+                密码
+                <input id="account-password" type="password" maxlength="64" placeholder="至少 4 位" autocomplete="current-password" />
+              </label>
+              <label>
+                显示名（仅注册时使用）
+                <input id="account-display" maxlength="16" placeholder="留空则与账号名相同" />
+              </label>
+              <div class="account-actions">
+                <button id="account-login" class="primary">登录</button>
+                <button id="account-register" class="secondary">注册新账号</button>
+              </div>
+              <p class="hint">账号与密码按需求以明文保存在服务端 data 目录，请只在可信局域网内使用本服务。</p>
+            </div>
+
+            <div id="account-user" class="hidden">
+              <div class="profile-head">
+                <span id="profile-avatar" class="avatar">你</span>
+                <div>
+                  <strong id="profile-name">玩家</strong>
+                  <small id="profile-username">@</small>
+                </div>
+                <button id="account-logout" class="text-button">退出登录</button>
+              </div>
+              <div id="profile-stats" class="profile-stats"></div>
+
+              <div class="save-points-head">
+                <span>我的无尽存档点</span>
+                <button id="refresh-saves" class="text-button">刷新</button>
+              </div>
+              <div id="save-list" class="save-list">
+                <div class="empty-state">暂无存档，进入无尽模式后会自动保存。</div>
+              </div>
+
+              <details class="account-settings">
+                <summary>账号设置</summary>
+                <label>
+                  新密码
+                  <input id="password-new" type="password" maxlength="64" placeholder="修改密码需填写当前密码" />
+                </label>
+                <label>
+                  当前密码
+                  <input id="password-current" type="password" maxlength="64" placeholder="当前密码" />
+                </label>
+                <div class="account-actions">
+                  <button id="account-change-password" class="secondary">修改密码</button>
+                </div>
+                <p class="hint">注销账号会同时删除该账号的所有存档，且不可恢复。</p>
+                <label>
+                  输入密码以注销账号
+                  <input id="account-delete-password" type="password" maxlength="64" placeholder="当前密码" />
+                </label>
+                <div class="account-actions">
+                  <button id="account-delete" class="secondary danger">注销账号</button>
+                </div>
+              </details>
+            </div>
+
+            <details id="admin-panel" class="admin-panel">
+              <summary>服务器数据备份 / 导入还原</summary>
+              <div class="admin-body">
+                <label>
+                  管理密钥
+                  <input id="admin-key" placeholder="服务端启动时终端打印的管理密钥" />
+                </label>
+                <div class="admin-actions">
+                  <button id="admin-info" class="secondary">数据概览</button>
+                  <button id="admin-export" class="secondary">导出备份</button>
+                  <button id="admin-snapshot" class="secondary">立即快照</button>
+                </div>
+                <label class="file-field">
+                  选择备份文件（.json）
+                  <input id="admin-import-file" type="file" accept="application/json,.json" />
+                </label>
+                <div class="admin-actions">
+                  <button id="admin-import-replace" class="secondary danger">覆盖还原</button>
+                  <button id="admin-import-merge" class="secondary">合并导入</button>
+                </div>
+                <div class="save-points-head">
+                  <span>服务器本地快照</span>
+                  <button id="admin-refresh-backups" class="text-button">刷新</button>
+                </div>
+                <div id="admin-backup-list" class="save-list">
+                  <div class="empty-state">填写管理密钥后可查看快照。</div>
+                </div>
+                <pre id="admin-output" class="admin-output"></pre>
+              </div>
+            </details>
+          </article>
         </div>
       </section>
 
@@ -111,6 +219,14 @@
               <span id="room-mode-badge" class="badge">合作生存</span>
               <h2 id="mission-title">坚守五个波次</h2>
               <p id="mission-description">自动锁定怪物射击，拾取能量升级，倒下后等待队友救援。</p>
+              <div id="save-point-box" class="save-point-box hidden">
+                <div class="save-points-head">
+                  <span>存档点</span>
+                  <span id="save-point-current" class="save-point-current">新开始</span>
+                </div>
+                <div id="room-save-list" class="save-list"></div>
+                <p class="hint">无尽模式下每清空一波会自动保存；房主也可以随时按 💾 手动保存。</p>
+              </div>
               <div class="controls-card">
                 <span>操作</span>
                 <strong>A / D</strong> 移动
@@ -149,8 +265,9 @@
           <div class="hud-actions">
             <button id="open-shop" class="hud-btn">🛒 商店 <kbd>Tab</kbd></button>
             <button id="open-backpack" class="hud-btn">🎒 背包 <kbd>B</kbd></button>
+            <button id="save-progress" class="hud-btn hidden">💾 保存进度</button>
           </div>
-          <div class="hud-help">A D 移动 · W / 空格 二段跳 · E 技能 · Tab 商店 · B 背包</div>
+          <div class="hud-help">A D 移动 · W / 空格 二段跳 · E 技能 · Tab 商店 · B 背包 · 无尽模式可 💾 手动存档</div>
         </div>
         <div id="upgrade-modal" class="modal hidden">
           <div class="modal-card">
@@ -183,6 +300,7 @@
           <div class="modal-card result-card">
             <p class="eyebrow">MISSION COMPLETE</p>
             <h2 id="result-title">战斗结束</h2>
+            <p id="result-note" class="result-note"></p>
             <button id="return-room" class="primary">返回房间</button>
           </div>
         </div>

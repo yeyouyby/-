@@ -1,9 +1,11 @@
 import {
+  ENDLESS,
   GROUND_Y,
   MAP_HEIGHT,
   MAP_WIDTH,
   PLAYER_BASE,
   PLAYER_RADIUS,
+  SAVE_STATE_VERSION,
   getPlayerClass,
   getItem,
   getUpgrade,
@@ -29,6 +31,75 @@ const GRAVITY = 1800;
 const GAME_DURATION = 150;
 const COYOTE_TIME = 0.12;
 const JUMP_BUFFER = 0.12;
+
+// 存档中保存的玩家数值字段（直接赋值还原，避免强化被重复叠加）
+const SAVED_STAT_KEYS = [
+  "maxHp",
+  "speed",
+  "jumpSpeed",
+  "maxJumps",
+  "damage",
+  "attackRate",
+  "projectileSpeed",
+  "armor",
+  "regen",
+  "critChance",
+  "pierce",
+  "lifesteal",
+  "goldBonus",
+  "projectileCount",
+  "pickupRange",
+  "skillCooldownMax",
+];
+
+function sanitizeMap(map) {
+  if (!map || typeof map !== "object") return null;
+  if (!Number.isFinite(map.width) || !Number.isFinite(map.height) || !Number.isFinite(map.groundY)) return null;
+  if (!Array.isArray(map.platforms)) return null;
+  return {
+    width: map.width,
+    height: map.height,
+    groundY: map.groundY,
+    platforms: map.platforms
+      .filter((platform) => platform && Number.isFinite(platform.x) && Number.isFinite(platform.y))
+      .map((platform) => ({
+        x: platform.x,
+        y: platform.y,
+        width: Number.isFinite(platform.width) ? platform.width : 160,
+        height: Number.isFinite(platform.height) ? platform.height : 24,
+      })),
+    decorations: Array.isArray(map.decorations) ? map.decorations.slice(0, 200) : [],
+  };
+}
+
+function sanitizeWeapons(weapons) {
+  if (!Array.isArray(weapons)) return null;
+  const list = weapons
+    .filter((weapon) => weapon && getWeapon(weapon.id))
+    .slice(0, MAX_WEAPONS)
+    .map((weapon) => ({ id: weapon.id, level: Math.max(1, Math.min(MAX_WEAPON_LEVEL, Math.floor(weapon.level ?? 1))), cooldown: 0 }));
+  return list.length ? list : null;
+}
+
+function sanitizeItems(items) {
+  if (!Array.isArray(items)) return null;
+  const list = items
+    .filter((item) => item && getItem(item.id))
+    .slice(0, MAX_ITEMS)
+    .map((item) => ({ id: item.id, count: Math.max(1, Math.floor(item.count ?? 1)) }));
+  return list.length ? list : null;
+}
+
+function sanitizeUpgrades(upgrades) {
+  if (!upgrades || typeof upgrades !== "object") return null;
+  const result = {};
+  for (const [id, level] of Object.entries(upgrades)) {
+    const config = getUpgrade(id);
+    if (!config) continue;
+    result[id] = Math.max(1, Math.min(config.maxLevel, Math.floor(Number(level) || 1)));
+  }
+  return result;
+}
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -84,9 +155,12 @@ export class GameSession {
     this.room = room;
     this.io = io;
     this.onFinished = onFinished;
+    this.onWaveCleared = options.onWaveCleared ?? null; // 无尽模式：进入和平时间时回调（用于自动存档）
+    this.onFinish = options.onFinish ?? null; // 对局结束回调（用于结算账号统计与存档状态）
     this.tickRate = options.tickRate ?? SERVER_TICK_RATE;
     this.snapshotEvery = Math.max(1, Math.round(this.tickRate / SNAPSHOT_RATE));
     this.now = options.now ?? (() => Date.now());
+    this.endless = room.mode === "endless";
     this.players = new Map();
     this.enemies = new Map();
     this.projectiles = new Map();
@@ -95,7 +169,7 @@ export class GameSession {
     this.elapsed = 0;
     this.wave = 1;
     this.phase = "combat";
-    this.phaseTimer = WAVE_DURATION;
+    this.phaseTimer = this.combatDuration();
     this.waveSpawnBudget = 0;
     this.spawnCooldown = 0;
     this.bossWavesSpawned = new Set();
@@ -104,12 +178,27 @@ export class GameSession {
     this.ended = false;
     this.result = null;
     this.loop = null;
+    this.restoredFromSave = false;
+    this.saveStateVersion = SAVE_STATE_VERSION;
     this.buildPlayers();
     this.shopStock = this.buildShopStock();
+    if (options.save) this.restoreFromSave(options.save);
   }
 
   totalDuration() {
+    // 无尽模式没有终点，返回 null 让客户端显示“已生存时间”
+    if (this.endless) return null;
     return WAVE_DURATION * MAX_WAVES + PEACE_DURATION * (MAX_WAVES - 1);
+  }
+
+  combatDuration() {
+    if (!this.endless) return WAVE_DURATION;
+    return Math.min(ENDLESS.combatMax, ENDLESS.baseCombatDuration + (this.wave - 1) * ENDLESS.combatGrowth);
+  }
+
+  peaceDuration() {
+    if (!this.endless) return PEACE_DURATION;
+    return Math.max(ENDLESS.peaceMin, ENDLESS.basePeaceDuration - (this.wave - 1) * ENDLESS.peaceDecay);
   }
 
   buildPlayers() {
@@ -122,6 +211,8 @@ export class GameSession {
       this.players.set(lobbyPlayer.id, {
         id: lobbyPlayer.id,
         name: lobbyPlayer.name,
+        accountId: lobbyPlayer.accountId ?? null,
+        username: lobbyPlayer.username ?? null,
         classId: playerClass.id,
         className: playerClass.name,
         skillName: playerClass.skillName,
@@ -184,11 +275,16 @@ export class GameSession {
     if (this.loop || this.ended) return;
     this.io.to(this.room.code).emit("game:start", {
       mode: this.room.mode,
+      endless: this.endless,
       map: this.map,
+      resumed: this.restoredFromSave,
+      wave: this.wave,
+      phase: this.phase,
     });
     this.emitShopStock();
     const dt = 1 / this.tickRate;
     this.loop = setInterval(() => this.update(dt), 1000 / this.tickRate);
+    this.loop.unref?.(); // 服务器进程由 HTTP 监听保持存活，测试中也不会挂住进程
   }
 
   stop() {
@@ -266,7 +362,7 @@ export class GameSession {
   buyShopItem(playerId, itemId) {
     const player = this.players.get(playerId);
     if (!player || !player.alive) return false;
-    if (this.room.mode === "pve" && this.phase !== "peace") {
+    if (this.isCoop() && this.phase !== "peace") {
       this.io.to(playerId).emit("shop:error", { message: "商店仅在和平时间开放" });
       return false;
     }
@@ -368,12 +464,24 @@ export class GameSession {
     };
   }
 
+  /** 合作玩法（固定波次 / 无尽）共用波次、商店、救援与怪物目标逻辑 */
+  isCoop() {
+    return this.endless || this.room.mode === "pve";
+  }
+
+  /** 是否还有在线玩家：全员掉线（刷新、断网、房主睡眠）时暂停推进，避免空房间刷波次和存档 */
+  hasConnectedPlayers() {
+    return [...this.players.values()].some((player) => !player.disconnected);
+  }
+
   update(dt) {
     if (this.ended) return;
+    if (this.players.size === 0) return; // 房间已空，交由上层停止对局
+    if (!this.hasConnectedPlayers()) return; // 全员掉线：冻结计时、波次与自动存档，等待重连
     this.elapsed += dt;
     this.tickNumber += 1;
     this.updatePlayers(dt);
-    if (this.room.mode === "pve") this.updatePve(dt);
+    if (this.isCoop()) this.updatePve(dt);
     this.updateOrbits(dt);
     this.updateProjectiles(dt);
     this.updatePickups(dt);
@@ -386,7 +494,7 @@ export class GameSession {
     for (const player of this.players.values()) {
       if (player.disconnected) continue;
       if (!player.alive) {
-        if (this.room.mode === "pve" && this.livingPlayers().length > 0) {
+        if (this.isCoop() && this.livingPlayers().length > 0) {
           player.downFor -= dt;
           if (player.downFor <= 0) this.revivePlayer(player);
         }
@@ -509,7 +617,7 @@ export class GameSession {
   healPulse(player) {
     for (const target of this.players.values()) {
       if (distanceSquared(player, target) > 460 * 460) continue;
-      if (!target.alive && this.room.mode === "pve") {
+      if (!target.alive && this.isCoop()) {
         target.alive = true;
         target.downFor = 0;
         target.invulnerableFor = 1.6;
@@ -521,16 +629,22 @@ export class GameSession {
   updatePve(dt) {
     if (this.phase === "combat") {
       this.phaseTimer -= dt;
-      this.waveSpawnBudget += dt * (0.8 + this.wave * 0.42);
+      const spawnRate = Math.min(
+        ENDLESS.spawnRateCap,
+        0.8 + this.wave * ENDLESS.spawnRateGrowth,
+      );
+      this.waveSpawnBudget += dt * (this.endless ? spawnRate : 0.8 + this.wave * 0.42);
       this.spawnCooldown -= dt;
-      const maxEnemies = 7 + this.wave * 5;
+      const maxEnemies = this.endless
+        ? Math.min(ENDLESS.maxEnemies, 8 + this.wave * 6)
+        : 7 + this.wave * 5;
       if (this.waveSpawnBudget >= 1 && this.spawnCooldown <= 0 && this.enemies.size < maxEnemies) {
         this.spawnEnemy();
         this.waveSpawnBudget -= 1;
         this.spawnCooldown = Math.max(0.16, 0.52 - this.wave * 0.05);
       }
       if (this.phaseTimer <= 0) {
-        if (this.wave >= MAX_WAVES) {
+        if (!this.endless && this.wave >= MAX_WAVES) {
           this.finish({ title: "合作胜利，所有波次已清除", winnerIds: this.connectedLivingPlayers().map((player) => player.id) });
           return;
         }
@@ -604,30 +718,59 @@ export class GameSession {
 
   enterPeace() {
     this.phase = "peace";
-    this.phaseTimer = PEACE_DURATION;
+    this.phaseTimer = this.peaceDuration();
     this.enemies.clear();
     for (const player of this.livingPlayers()) {
       player.hp = Math.min(player.maxHp, player.hp + player.maxHp * 0.12);
     }
     this.shopStock = this.buildShopStock();
     this.emitShopStock();
-    this.io.to(this.room.code).emit("game:event", { type: "peace", duration: PEACE_DURATION, wave: this.wave });
+    this.io.to(this.room.code).emit("game:event", {
+      type: "peace",
+      duration: this.phaseTimer,
+      wave: this.wave,
+      endless: this.endless,
+    });
+    // 无尽模式：清完一波即认为到达安全点，交给上层写入服务器存档
+    if (this.endless) this.notifyWaveCleared();
+  }
+
+  notifyWaveCleared() {
+    try {
+      this.onWaveCleared?.(this);
+    } catch (error) {
+      this.io.to(this.room.code).emit("game:event", { type: "saveFailed", message: error.message });
+    }
   }
 
   enterCombat() {
     this.wave += 1;
     this.phase = "combat";
-    this.phaseTimer = WAVE_DURATION;
+    this.phaseTimer = this.combatDuration();
     this.waveSpawnBudget = 0;
     this.spawnCooldown = 0.6;
     for (const player of this.livingPlayers()) {
       player.hp = Math.min(player.maxHp, player.hp + player.maxHp * 0.15);
     }
-    if ((this.wave === 3 || this.wave === 5) && !this.bossWavesSpawned.has(this.wave)) {
-      this.spawnEnemy("boss");
-      this.bossWavesSpawned.add(this.wave);
+    if (this.isBossWave()) this.spawnWaveBosses();
+    this.io.to(this.room.code).emit("game:event", { type: "wave", wave: this.wave, endless: this.endless });
+  }
+
+  /** 刷新当前波次的 Boss（数量随无尽波次递增） */
+  spawnWaveBosses() {
+    if (this.bossWavesSpawned.has(this.wave)) return 0;
+    const count = this.endless ? 1 + Math.floor(this.wave / (ENDLESS.bossEveryWaves * 2)) : 1;
+    let spawned = 0;
+    for (let index = 0; index < count; index += 1) {
+      if (this.spawnEnemy("boss")) spawned += 1;
     }
-    this.io.to(this.room.code).emit("game:event", { type: "wave", wave: this.wave });
+    this.bossWavesSpawned.add(this.wave);
+    return spawned;
+  }
+
+  /** 当前波次是否为 Boss 波 */
+  isBossWave() {
+    return this.endless ? this.wave % ENDLESS.bossEveryWaves === 0 : this.wave === 3 || this.wave === 5;
   }
 
   spawnEnemy(kind = "grunt") {
@@ -637,9 +780,17 @@ export class GameSession {
     const side = Math.random() < 0.5 ? -1 : 1;
     const x = clamp(anchor.x + side * (650 + Math.random() * 400), 40, MAP_WIDTH - 40);
     const boss = kind === "boss";
-    const elite = boss || kind === "elite" || Math.random() < 0.05 * this.wave;
+    const elite = boss || kind === "elite" || Math.random() < Math.min(
+      ENDLESS.eliteChanceCap,
+      0.05 * this.wave,
+    );
     const radius = boss ? 58 : elite ? 32 : 22;
-    const hp = (boss ? 700 + this.players.size * 180 : elite ? 120 : 42) * (1 + (this.wave - 1) * 0.33);
+    const hpScale = this.endless
+      ? 1 + (this.wave - 1) * ENDLESS.hpGrowth + Math.max(0, this.wave - ENDLESS.lateWaveThreshold) * ENDLESS.lateHpGrowth
+      : 1 + (this.wave - 1) * 0.33;
+    const hp = (boss ? 700 + this.players.size * 180 : elite ? 120 : 42) * hpScale;
+    const speedGrowth = this.endless ? ENDLESS.speedGrowth : 7;
+    const damageGrowth = this.endless ? ENDLESS.damageGrowth : 2;
     const enemy = {
       id: randomId("enemy"),
       x,
@@ -654,8 +805,8 @@ export class GameSession {
       radius,
       hp,
       maxHp: hp,
-      speed: (boss ? 82 : elite ? 105 : 145) + this.wave * 7,
-      damage: (boss ? 32 : elite ? 22 : 12) + this.wave * 2,
+      speed: (boss ? 82 : elite ? 105 : 145) + this.wave * speedGrowth,
+      damage: (boss ? 32 : elite ? 22 : 12) + this.wave * damageGrowth,
       attackCooldown: Math.random() * 0.5,
       orbitHitCooldown: 0,
       elite,
@@ -664,10 +815,11 @@ export class GameSession {
       bobHeight: boss ? 7 : 0,
     };
     this.enemies.set(enemy.id, enemy);
+    return enemy;
   }
 
   findTarget(player) {
-    const candidates = this.room.mode === "pve"
+    const candidates = this.isCoop()
       ? [...this.enemies.values()]
       : this.livingPlayers().filter((candidate) => candidate.id !== player.id && !candidate.disconnected);
     let closest = null;
@@ -778,7 +930,7 @@ export class GameSession {
         this.projectiles.delete(projectile.id);
         continue;
       }
-      const hit = this.room.mode === "pve"
+      const hit = this.isCoop()
         ? this.hitEnemy(projectile)
         : this.hitOpponent(projectile);
       if (hit) this.projectiles.delete(projectile.id);
@@ -1068,6 +1220,153 @@ export class GameSession {
     return pool[pool.length - 1];
   }
 
+  /* --------------------------------------------------- 存档点：序列化 / 还原 */
+
+  /** 生成可直接写入服务器存档的完整进度（含地图，保证续玩地形一致） */
+  captureSaveState() {
+    return {
+      version: SAVE_STATE_VERSION,
+      mode: this.room.mode,
+      endless: this.endless,
+      wave: this.wave,
+      phase: this.phase,
+      elapsed: this.elapsed,
+      tickNumber: this.tickNumber,
+      map: this.map,
+      players: [...this.players.values()].map((player) => this.capturePlayerState(player)),
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
+  capturePlayerState(player) {
+    const stats = {};
+    for (const key of SAVED_STAT_KEYS) stats[key] = player[key];
+    return {
+      accountId: player.accountId ?? null,
+      username: player.username ?? null,
+      name: player.name,
+      classId: player.classId,
+      className: player.className,
+      x: player.x,
+      y: player.y,
+      facing: player.facing,
+      hp: player.hp,
+      shield: player.shield,
+      alive: player.alive,
+      kills: player.kills,
+      gold: player.gold,
+      level: player.level,
+      xp: player.xp,
+      xpNeeded: player.xpNeeded,
+      owedUpgrades: player.owedUpgrades,
+      weapons: player.weapons.map((weapon) => ({ id: weapon.id, level: weapon.level })),
+      items: player.items.map((item) => ({ id: item.id, count: item.count })),
+      upgrades: { ...player.upgrades },
+      stats,
+    };
+  }
+
+  findSavedPlayer(savedPlayers, player) {
+    if (!Array.isArray(savedPlayers)) return null;
+    const byAccount = player.accountId
+      ? savedPlayers.find((candidate) => candidate?.accountId && candidate.accountId === player.accountId)
+      : null;
+    if (byAccount) return byAccount;
+    const byUsername = player.username
+      ? savedPlayers.find((candidate) => candidate?.username && candidate.username === player.username)
+      : null;
+    if (byUsername) return byUsername;
+    return savedPlayers.find((candidate) => candidate?.name && candidate.name === player.name) ?? null;
+  }
+
+  /** 用存档点覆盖当前对局状态：波次、阶段、地图与每位玩家的成长 */
+  restoreFromSave(save) {
+    const state = save?.state ?? save;
+    if (!state || typeof state !== "object") return false;
+    const map = sanitizeMap(state.map);
+    if (map) this.map = map;
+    this.wave = Math.max(1, Math.floor(Number(state.wave) || 1));
+    this.phase = state.phase === "peace" ? "peace" : "combat";
+    this.phaseTimer = this.phase === "peace" ? this.peaceDuration() : this.combatDuration();
+    this.elapsed = Math.max(0, Number(state.elapsed) || 0);
+    this.tickNumber = Math.max(0, Math.floor(Number(state.tickNumber) || 0));
+    this.spawnCooldown = 1;
+    this.restoredFromSave = true;
+
+    const savedPlayers = Array.isArray(state.players) ? state.players : [];
+    for (const player of this.players.values()) {
+      const saved = this.findSavedPlayer(savedPlayers, player);
+      if (saved) this.applyPlayerState(player, saved);
+      else this.grantCatchUp(player);
+    }
+    // 存档里不保存敌人：如果存档点停在 Boss 波的战斗阶段，需要补刷该波 Boss，
+    // 否则从第 5/10/… 波继续时会缺少本该出现的 Boss。
+    if (this.phase === "combat" && this.isCoop() && this.isBossWave()) {
+      this.spawnWaveBosses();
+    }
+    return true;
+  }
+
+  applyPlayerState(player, saved) {
+    const stats = saved.stats && typeof saved.stats === "object" ? saved.stats : {};
+    for (const key of SAVED_STAT_KEYS) {
+      const value = stats[key];
+      if (Number.isFinite(value) && value > 0) player[key] = value;
+    }
+    // 职业变化时不沿用旧职业的技能冷却，避免技能与冷却不匹配
+    const playerClass = getPlayerClass(player.classId);
+    const classChanged = Boolean(saved.classId) && saved.classId !== player.classId;
+    if (classChanged || !Number.isFinite(stats.skillCooldownMax)) {
+      player.skillCooldownMax = playerClass.skillCooldown;
+    } else {
+      player.skillCooldownMax = Math.max(1, stats.skillCooldownMax);
+    }
+    player.maxHp = Math.max(30, player.maxHp);
+    player.hp = Math.min(player.maxHp, Math.max(1, Number(saved.hp) || player.maxHp));
+    player.shield = Math.max(0, Number(saved.shield) || 0);
+    player.shieldFor = player.shield > 0 ? 5 : 0;
+    player.gold = Math.max(0, Math.floor(Number(saved.gold) || 0));
+    player.level = Math.max(1, Math.floor(Number(saved.level) || 1));
+    player.xp = Math.max(0, Number(saved.xp) || 0);
+    player.xpNeeded = Math.max(5, Math.floor(Number(saved.xpNeeded) || player.xpNeeded));
+    player.kills = Math.max(0, Math.floor(Number(saved.kills) || 0));
+    const weapons = sanitizeWeapons(saved.weapons);
+    if (weapons) player.weapons = weapons;
+    const items = sanitizeItems(saved.items);
+    if (items) player.items = items;
+    const upgrades = sanitizeUpgrades(saved.upgrades);
+    if (upgrades) player.upgrades = upgrades;
+    if (Number.isFinite(saved.x)) player.x = clamp(saved.x, PLAYER_RADIUS, MAP_WIDTH - PLAYER_RADIUS);
+    if (Number.isFinite(saved.y)) player.y = clamp(saved.y, PLAYER_RADIUS, GROUND_Y);
+    player.facing = saved.facing === -1 ? -1 : 1;
+    player.alive = true;
+    player.downFor = 0;
+    player.invulnerableFor = 2;
+    player.vx = 0;
+    player.vy = 0;
+    player.owedUpgrades = Math.max(0, Math.min(20, Math.floor(Number(saved.owedUpgrades) || 0)));
+    this.dispatchUpgrades(player);
+    return player;
+  }
+
+  /** 玩家不在存档中（中途加入）时，按波次给予基础补偿 */
+  grantCatchUp(player) {
+    const steps = Math.max(0, this.wave - 1);
+    const multiplier = Math.min(ENDLESS.catchUp.maxMultiplier, 1 + steps * ENDLESS.catchUp.perWaveHpBonus);
+    player.maxHp = Math.round(player.maxHp * multiplier);
+    player.hp = player.maxHp;
+    player.damage *= Math.min(ENDLESS.catchUp.maxMultiplier, 1 + steps * ENDLESS.catchUp.perWaveDamageBonus);
+    player.gold += steps * ENDLESS.catchUp.goldPerWave;
+    player.level = Math.max(player.level, 1 + Math.min(ENDLESS.catchUp.maxLevels, steps));
+    player.owedUpgrades += Math.min(ENDLESS.catchUp.maxLevels, Math.max(0, steps));
+    player.invulnerableFor = 3;
+    player.x = MAP_WIDTH / 2 + (Math.random() - 0.5) * 200;
+    player.y = GROUND_Y - PLAYER_RADIUS;
+    player.vy = 0;
+    this.dispatchUpgrades(player);
+    return player;
+  }
+
   resolvePendingUpgrades() {
     const now = this.now();
     for (const player of this.players.values()) {
@@ -1124,16 +1423,34 @@ export class GameSession {
       return;
     }
     if (living.length === 0) {
-      this.finish({ title: `挑战失败，坚持了 ${Math.floor(this.elapsed)} 秒`, winnerIds: [] });
+      // 无尽模式下若全员掉线（可能只是刷新页面或网络抖动），先不结算，
+      // 保留存档与房间席位，等待重连后再继续。
+      const anyoneConnected = [...this.players.values()].some((player) => !player.disconnected);
+      if (this.endless && this.players.size > 0 && !anyoneConnected) return;
+      this.finish({
+        title: this.endless
+          ? `无尽挑战结束：到达第 ${this.wave} 波，生存 ${Math.floor(this.elapsed)} 秒`
+          : `挑战失败，坚持了 ${Math.floor(this.elapsed)} 秒`,
+        winnerIds: [],
+        wave: this.wave,
+        endless: this.endless,
+        saveId: this.room.saveId ?? null,
+      });
     }
   }
 
   finish(result) {
     this.ended = true;
-    this.result = result;
+    this.result = { ...result, wave: result.wave ?? this.wave, endless: this.endless, mode: this.room.mode };
     this.stop();
+    for (const player of this.players.values()) player.input = { left: false, right: false, jump: false, skill: false };
     this.broadcastSnapshot();
-    this.io.to(this.room.code).emit("game:end", result);
+    this.io.to(this.room.code).emit("game:end", this.result);
+    try {
+      this.onFinish?.(this.result, this);
+    } catch (error) {
+      console.error("结算回调失败:", error);
+    }
   }
 
   broadcastSnapshot() {
@@ -1143,7 +1460,11 @@ export class GameSession {
   snapshot() {
     return {
       elapsed: this.elapsed,
-      duration: this.room.mode === "pve" ? this.totalDuration() : GAME_DURATION,
+      duration: this.endless ? null : this.room.mode === "pve" ? this.totalDuration() : GAME_DURATION,
+      mode: this.room.mode,
+      endless: this.endless,
+      saveId: this.room.saveId ?? null,
+      saveLabel: this.room.saveLabel ?? null,
       wave: this.wave,
       phase: this.phase,
       phaseTimer: this.phaseTimer,
