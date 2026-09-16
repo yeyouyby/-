@@ -25,6 +25,53 @@ export function tierInfo(tier) {
   return TIERS[Math.max(0, Math.min(TIERS.length - 1, (tier ?? 1) - 1))];
 }
 
+// 游戏模式：pve 固定 5 波，pvp 乱斗，endless 无尽波次（可存档、可从存档点继续）
+export const GAME_MODES = [
+  { id: "pve", name: "合作生存", description: "并肩抵抗 5 波怪物" },
+  { id: "pvp", name: "竞技乱斗", description: "自动射击，最后一人获胜" },
+  { id: "endless", name: "无尽模式", description: "波次无限递进，进度自动存档，可从存档点继续" },
+];
+
+export function isGameMode(mode) {
+  return GAME_MODES.some((entry) => entry.id === mode);
+}
+
+export function modeInfo(mode) {
+  return GAME_MODES.find((entry) => entry.id === mode) ?? GAME_MODES[0];
+}
+
+// 无尽模式的成长曲线：波次越高，敌人越强、刷新越快、和平时间越短
+export const ENDLESS = {
+  baseCombatDuration: WAVE_DURATION,
+  combatGrowth: 2, // 每波 +2 秒，最长 combatMax
+  combatMax: 50,
+  basePeaceDuration: PEACE_DURATION,
+  peaceDecay: 0.6, // 每波 -0.6 秒，最短 peaceMin
+  peaceMin: 7,
+  hpGrowth: 0.33, // 与固定波次一致的每波血量成长
+  lateHpGrowth: 0.12, // 第 lateWaveThreshold 波之后额外的血量成长
+  lateWaveThreshold: 8,
+  speedGrowth: 9,
+  damageGrowth: 2.4,
+  spawnRateCap: 6, // 每秒最多生成 6 只
+  spawnRateGrowth: 0.42,
+  maxEnemies: 96,
+  bossEveryWaves: 5,
+  eliteChanceCap: 0.4,
+  catchUp: {
+    // 中途加入（或未参与原存档）的玩家获得的基础补偿
+    perWaveHpBonus: 0.05,
+    perWaveDamageBonus: 0.05,
+    maxMultiplier: 1.6,
+    maxLevels: 5,
+    goldPerWave: 5,
+  },
+};
+
+export const MAX_SAVES_PER_ACCOUNT = 20;
+export const SAVE_STATE_VERSION = 1;
+export const AUTOSAVE_MIN_INTERVAL_MS = 3_000;
+
 export const PLAYER_BASE = {
   maxHp: 100,
   speed: 310,

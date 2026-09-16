@@ -7,8 +7,11 @@
     "start": "node src/server.js",
     "start:windows": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test",
-    "check": "node --check src/server.js && node --check src/game.js && node --check src/room-manager.js && node --check public/client.js"
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/server.js && node --check src/game.js && node --check src/room-manager.js && node --check src/store.js && node --check src/account-service.js && node --check src/admin-api.js && node --check src/cli.js && node --check public/client.js",
+    "backup": "node src/cli.js export",
+    "restore": "node src/cli.js import",
+    "data:info": "node src/cli.js info"
   },
   "engines": {
     "node": ">=20"
