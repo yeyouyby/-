@@ -133,6 +133,8 @@ export class DataStore {
       this.adminKey = this.server.adminKey;
       this.markDirty("server");
     }
+    // 兼容早期版本导入产生过的重复账号 id
+    this.repairedAccountIds = this.repairAccountIdCollisions();
     this.accountsDirectoryReady = true;
     return this;
   }
@@ -261,10 +263,79 @@ export class DataStore {
   }
 
   getAccountById(accountId) {
+    const wanted = ensureString(accountId);
+    if (!wanted) return null;
     for (const account of this.accounts.values()) {
-      if (account.id === accountId) return account;
+      if (account.id === wanted) return account;
     }
     return null;
+  }
+
+  /** 生成一个当前库中未被占用的账号 id */
+  uniqueAccountId(taken = null) {
+    const used = taken ?? new Set([...this.accounts.values()].map((account) => account.id));
+    let candidate = randomId("acct");
+    while (used.has(candidate)) candidate = randomId("acct");
+    used.add(candidate);
+    return candidate;
+  }
+
+  usedAccountIds() {
+    return new Set([...this.accounts.values()].map((account) => account.id));
+  }
+
+  /**
+   * 修复历史数据里重复的账号 id（早期导入逻辑的缺陷可能让两个账号共用一个 id，
+   * 导致 getAccountById 命中错误的账号）。重复者改用新的 id，并按用户名把
+   * 存档与登录令牌迁移过去；无法确认归属的令牌会被吊销（宁可重新登录）。
+   */
+  repairAccountIdCollisions() {
+    const seen = new Map(); // id -> 第一个持有该 id 的账号
+    const taken = new Set();
+    const repaired = [];
+    for (const account of this.accounts.values()) {
+      if (!taken.has(account.id)) {
+        taken.add(account.id);
+        seen.set(account.id, account);
+        continue;
+      }
+      const previousId = account.id;
+      account.id = this.uniqueAccountId(taken);
+      repaired.push({ username: account.username, previousId, id: account.id });
+    }
+    if (repaired.length === 0) return [];
+
+    for (const entry of repaired) {
+      const name = entry.username.toLowerCase();
+      for (const save of this.saves.values()) {
+        if (save.accountId !== entry.previousId) continue;
+        // 该 id 原来被两个账号共用，按存档记录的所属用户名判断真正的主人
+        const ownerName = ensureString(save.username).toLowerCase();
+        if (ownerName === name) {
+          save.accountId = entry.id;
+          save.username = entry.username;
+        } else if (!ownerName) {
+          save.username = this.getAccountById(save.accountId)?.username ?? save.username;
+        }
+      }
+      for (const [token, session] of [...this.sessions]) {
+        if (session.accountId !== entry.previousId) continue;
+        const sessionName = ensureString(session.username).toLowerCase();
+        if (sessionName === name) {
+          session.accountId = entry.id;
+          session.username = entry.username;
+        } else if (!sessionName) {
+          // 没有用户名可供判断：无法确定这份令牌属于谁，直接吊销
+          this.sessions.delete(token);
+        }
+      }
+    }
+    this.markDirty("accounts");
+    this.markDirty("saves");
+    this.logger.warn?.(
+      `[store] 检测到重复的账号 id，已修复 ${repaired.length} 个账号：${repaired.map((entry) => entry.username).join("、")}`,
+    );
+    return repaired;
   }
 
   registerAccount({ username, password, displayName } = {}) {
@@ -598,9 +669,9 @@ export class DataStore {
     const report = {
       mode,
       importedAt: new Date().toISOString(),
-      accounts: { added: 0, updated: 0, skipped: 0 },
+      accounts: { added: 0, updated: 0, skipped: 0, reassigned: 0, repaired: 0 },
       saves: { added: 0, updated: 0, skipped: 0, removed: 0, orphaned: 0 },
-      sessions: { imported: 0 },
+      sessions: { imported: 0, skipped: 0 },
       adminKeyPreserved: true,
       preImportBackup: null,
     };
@@ -622,28 +693,50 @@ export class DataStore {
     // 同一账号在两台服务器上的 id 可能不同：合并时保留本机 id，
     // 并记录「备份 id -> 本机 id」的映射，用于重写存档与令牌的归属，
     // 否则导入的存档会因为 accountId 对不上而对账号不可见。
-    const idMap = new Map();
+    //
+    // 安全性：来源 id 可能与「本机另一个用户名」的 id 相同（手工构造或跨服务器巧合）。
+    // 此时必须给新账号换一个本机唯一 id，否则两个账号共用一个 id，
+    // getAccountById 会命中错误的账号，导致存档串号甚至令牌登录成别人。
+    const idMap = new Map(); // 来源 id -> 本机 id
+    const usedIds = this.usedAccountIds(); // 本机已占用的 id
+    const ambiguousIds = new Set(); // 备份中指向多个用户名、无法安全归属的来源 id
+
     for (const raw of hasAccounts ? payload.accounts : []) {
       const account = this.normalizeAccountRecord(raw);
       if (!account) {
         report.accounts.skipped += 1;
         continue;
       }
+      const sourceId = account.id;
+      const mapped = idMap.has(sourceId) ? idMap.get(sourceId) : null;
       const key = account.username.toLowerCase();
       const existing = this.accounts.get(key);
       if (existing) {
+        if (mapped && mapped !== existing.id) ambiguousIds.add(sourceId);
+        idMap.set(sourceId, existing.id);
         existing.displayName = account.displayName || existing.displayName;
         existing.password = account.password || existing.password;
         existing.stats = { ...existing.stats, ...account.stats };
         existing.updatedAt = new Date().toISOString();
         this.accounts.set(key, existing);
-        idMap.set(account.id, existing.id);
         report.accounts.updated += 1;
-      } else {
-        this.accounts.set(key, account);
-        idMap.set(account.id, account.id);
-        report.accounts.added += 1;
+        continue;
       }
+
+      // 新账号：来源 id 已被其它账号占用（本机已有，或本次导入已分配）时改用新的本机 id
+      const takenBy = usedIds.has(sourceId) ? this.getAccountById(sourceId) : null;
+      const conflict = Boolean(takenBy) || (mapped !== null && mapped !== sourceId);
+      if (conflict) {
+        // 同一个来源 id 指向多个用户名：标记为有歧义，后续只按用户名归属，不再猜 id
+        ambiguousIds.add(sourceId);
+        account.id = this.uniqueAccountId(usedIds);
+        report.accounts.reassigned += 1;
+      } else {
+        usedIds.add(account.id);
+      }
+      if (!idMap.has(sourceId)) idMap.set(sourceId, account.id);
+      this.accounts.set(key, account);
+      report.accounts.added += 1;
     }
 
     for (const raw of hasSaves ? payload.saves : []) {
@@ -653,17 +746,18 @@ export class DataStore {
         continue;
       }
       save.accountId = idMap.get(save.accountId) ?? save.accountId;
-      // 存档内保存的玩家归属同样需要重映射，续玩时才能匹配到正确账号
+      // 存档内保存的玩家归属同样要重映射：解析不出主人的一律置空，
+      // 避免残留的来源 id 在以后被同 id 的账号误认领（续玩时仍可按用户名匹配）。
       if (Array.isArray(save.state?.players)) {
         for (const savedPlayer of save.state.players) {
-          if (savedPlayer?.accountId && idMap.has(savedPlayer.accountId)) {
-            savedPlayer.accountId = idMap.get(savedPlayer.accountId);
-          }
+          if (!savedPlayer) continue;
+          const current = ensureString(savedPlayer.accountId);
+          if (!current) continue;
+          savedPlayer.accountId = this.resolveImportedAccountId(current, savedPlayer.username, { idMap, ambiguousIds });
         }
       }
-      // id 对不上时按账号名兜底匹配（例如只导入存档的备份）
-      let owner = this.getAccountById(save.accountId);
-      if (!owner && save.username) owner = this.findAccount(save.username);
+      // 归属判断：重映射表 -> 所属用户名 -> 本机同 id 账号（需用户名一致）
+      const owner = this.resolveImportedAccount(save.accountId, save.username, { idMap, ambiguousIds });
       if (!owner) {
         // 没有对应账号的存档无法被任何账号使用，直接丢弃并统计
         report.saves.orphaned += 1;
@@ -680,9 +774,13 @@ export class DataStore {
     if (hasAccounts && Array.isArray(payload.sessions)) {
       for (const raw of payload.sessions) {
         const token = ensureString(raw?.token);
-        const accountId = idMap.get(ensureString(raw.accountId)) ?? ensureString(raw.accountId);
-        const account = this.getAccountById(accountId);
-        if (!token || !account) continue;
+        const sourceId = ensureString(raw.accountId);
+        // 来源 id 有歧义时按用户名回退；仍无法确定就吊销，避免令牌登录成别的账号
+        const account = this.resolveImportedAccount(sourceId, raw?.username, { idMap, ambiguousIds });
+        if (!token || !account) {
+          report.sessions.skipped += 1;
+          continue;
+        }
         this.sessions.set(token, {
           token,
           accountId: account.id,
@@ -694,6 +792,9 @@ export class DataStore {
         report.sessions.imported += 1;
       }
     }
+
+    // 兜底：确认账号 id 唯一（正常导入不会产生重复，这里防的是历史脏数据）
+    report.accounts.repaired = this.repairAccountIdCollisions().length;
 
     // 导入后清掉没有归属账号的旧存档，避免留下任何账号都读不到的记录
     // （例如只包含 accounts 的覆盖还原会把旧存档全部变成孤立数据）
@@ -714,6 +815,35 @@ export class DataStore {
     this.markDirty("server");
     this.pushHistory({ type: "import", at: report.importedAt, mode, report: this.summarizeReport(report) });
     return report;
+  }
+
+  /**
+   * 把备份中的来源账号 id 解析为本机账号。
+   *
+   * 关键约束：只要备份里记录了用户名，解析结果就必须与它一致（否则返回 null 表示「无法确定」）。
+   * 备份内容本身不可信，映射表与 id 只能当作线索，绝不能让某条记录挂到用户名不同的账号上。
+   */
+  resolveImportedAccount(sourceId, username, { idMap = new Map(), ambiguousIds = new Set() } = {}) {
+    const id = ensureString(sourceId);
+    const name = ensureString(username).trim().toLowerCase();
+    const matches = (account) => Boolean(account) && (!name || account.username.toLowerCase() === name);
+    const ambiguous = id ? ambiguousIds.has(id) : false;
+
+    if (id && !ambiguous) {
+      const mapped = this.getAccountById(idMap.get(id));
+      if (matches(mapped)) return mapped;
+      const direct = this.getAccountById(id);
+      if (matches(direct)) return direct;
+    }
+    if (name) {
+      const byName = this.findAccount(name);
+      if (byName) return byName;
+    }
+    return null;
+  }
+
+  resolveImportedAccountId(sourceId, username, context) {
+    return this.resolveImportedAccount(sourceId, username, context)?.id ?? null;
   }
 
   summarizeReport(report) {

@@ -834,7 +834,7 @@ async function importBackupFile(mode) {
   if (!result) return;
   const report = result.report ?? {};
   adminLog(
-    `${label}完成：账号 +${report.accounts?.added ?? 0}/~${report.accounts?.updated ?? 0}，存档 +${report.saves?.added ?? 0}/~${report.saves?.updated ?? 0}，令牌恢复 ${report.sessions?.imported ?? 0}，覆盖清理 ${report.saves?.removed ?? 0}，清理孤立存档 ${report.saves?.orphaned ?? 0}；原数据快照 ${report.preImportBackup ?? "无"}`,
+    `${label}完成：账号 +${report.accounts?.added ?? 0}/~${report.accounts?.updated ?? 0}（重新分配 id ${report.accounts?.reassigned ?? 0}），存档 +${report.saves?.added ?? 0}/~${report.saves?.updated ?? 0}（覆盖清理 ${report.saves?.removed ?? 0}，清理孤立 ${report.saves?.orphaned ?? 0}），令牌恢复 ${report.sessions?.imported ?? 0}（吊销 ${report.sessions?.skipped ?? 0}）；原数据快照 ${report.preImportBackup ?? "无"}`,
   );
   showToast(`${label}完成`);
   elements.adminImportFile.value = "";

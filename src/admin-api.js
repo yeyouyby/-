@@ -54,7 +54,11 @@ export function registerAdminRoutes(app, { store, roomManager, logger = console 
     const mode = request.query.mode === "merge" ? "merge" : "replace";
     try {
       const report = store.importBackup(request.body, { mode });
-      logger.log?.(`[admin] 导入备份完成（${mode}）：账号 +${report.accounts.added}/~${report.accounts.updated}，存档 +${report.saves.added}/~${report.saves.updated}（覆盖清理 ${report.saves.removed ?? 0}，清理孤立 ${report.saves.orphaned ?? 0}）`);
+      logger.log?.(
+        `[admin] 导入备份完成（${mode}）：账号 +${report.accounts.added}/~${report.accounts.updated}（重新分配 id ${report.accounts.reassigned ?? 0}）` +
+          `，存档 +${report.saves.added}/~${report.saves.updated}（覆盖清理 ${report.saves.removed ?? 0}，清理孤立 ${report.saves.orphaned ?? 0}）` +
+          `，令牌恢复 ${report.sessions.imported}（吊销 ${report.sessions.skipped ?? 0}）`,
+      );
       response.json({ ok: true, mode, report, data: store.stats() });
     } catch (error) {
       response.status(400).json({ ok: false, error: error.message });

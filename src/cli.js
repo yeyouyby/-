@@ -72,9 +72,9 @@ function importBackup(store, args) {
   const payload = JSON.parse(fs.readFileSync(file, "utf8"));
   const report = store.importBackup(payload, { mode });
   console.log(`导入完成（${mode === "merge" ? "合并" : "覆盖"}）: ${path.resolve(file)}`);
-  console.log(`账号：新增 ${report.accounts.added}，更新 ${report.accounts.updated}，跳过 ${report.accounts.skipped}`);
+  console.log(`账号：新增 ${report.accounts.added}，更新 ${report.accounts.updated}，跳过 ${report.accounts.skipped}，重新分配 id ${report.accounts.reassigned ?? 0}`);
   console.log(`存档：新增 ${report.saves.added}，更新 ${report.saves.updated}，跳过 ${report.saves.skipped}，覆盖清理 ${report.saves.removed ?? 0}，清理孤立 ${report.saves.orphaned ?? 0}`);
-  console.log(`登录令牌：恢复 ${report.sessions.imported}`);
+  console.log(`登录令牌：恢复 ${report.sessions.imported}，因归属不明吊销 ${report.sessions.skipped ?? 0}`);
   if (report.preImportBackup) console.log(`导入前的原数据已备份为: ${report.preImportBackup}`);
   console.log(`当前管理密钥（沿用本机密钥）: ${store.stats().adminKey}`);
   return 0;
